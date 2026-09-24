@@ -30,6 +30,14 @@
     "node": ">=20"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADkun/dsh-windows-notifier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ADkun/dsh-windows-notifier/issues"
+  },
+  "homepage": "https://github.com/ADkun/dsh-windows-notifier#readme",
   "scripts": {
     "test": "node --test test",
     "toast": "node scripts/send-test-toast.mjs"

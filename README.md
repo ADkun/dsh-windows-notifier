@@ -1,6 +1,6 @@
 # dsh-windows-notifier
 
-给 [DSH](https://github.com/deepseek-ai)（DeepSeek Harness）用的 Windows 原生通知插件：**任何**对话把控制权交还给你的时候，弹一条 Windows 系统通知。
+给 DSH（DeepSeek Harness）用的 Windows 原生通知插件：**任何**对话把控制权交还给你的时候，弹一条 Windows 系统通知。
 
 它监听的是整个 DSH 进程的事件，所以**后台正在运行的对话**同样会通知你 —— 你不用一直盯着某个会话窗口。
 
@@ -44,7 +44,7 @@ DSH 的能力全是 `cordis.yml` 里的一行行插件。装一个第三方插�
 
 ```powershell
 # 从 GitHub 装（推荐）
-dsh plugin --profile web add https://github.com/<your-name>/dsh-windows-notifier.git
+dsh plugin --profile web add https://github.com/ADkun/dsh-windows-notifier.git
 
 # 或者从本地目录装
 dsh plugin --profile web add D:\path\to\dsh-windows-notifier
