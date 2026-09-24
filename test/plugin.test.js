@@ -50,6 +50,18 @@ function createFakeContext(services) {
     get(serviceName) {
       return services[serviceName]
     },
+    /**
+     * Cordis opens the callback once every named service exists. Nothing in
+     * this file provides one, so the settings branch simply never opens — the
+     * event wiring under test must not depend on it.
+     */
+    inject(dependencies, callback) {
+      if (!dependencies.every((dependency) => services[dependency] !== undefined)) return () => {}
+      const injected = { ...this }
+      for (const dependency of dependencies) injected[dependency] = services[dependency]
+      callback(injected)
+      return () => {}
+    },
     effect(callback) {
       effects.push(callback)
       return () => {}

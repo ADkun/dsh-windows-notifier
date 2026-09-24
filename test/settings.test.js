@@ -123,7 +123,8 @@ test('the real schema resolves a full section', schemaOnly, () => {
 function createContext(services) {
   const listeners = new Map()
   const effects = []
-  return {
+  const pending = []
+  const context = {
     listeners,
     effects,
     on(event, handler, options) {
@@ -139,12 +140,38 @@ function createContext(services) {
     get(serviceName) {
       return services[serviceName]
     },
+    /**
+     * Cordis runs the callback once every named service exists and hands it a
+     * context that exposes them as properties. A service that only appears
+     * after `apply` still reaches the consumer — which is exactly why a plugin
+     * waits instead of sampling the service once.
+     */
+    inject(dependencies, callback) {
+      const open = () => {
+        const injected = { ...context }
+        for (const dependency of dependencies) injected[dependency] = services[dependency]
+        callback(injected)
+      }
+      if (dependencies.every((dependency) => services[dependency] !== undefined)) open()
+      else pending.push({ dependencies, open })
+      return () => {}
+    },
+    /** Publish a service the way the composition does when its row activates. */
+    provide(serviceName, service) {
+      services[serviceName] = service
+      for (const entry of [...pending]) {
+        if (!entry.dependencies.every((dependency) => services[dependency] !== undefined)) continue
+        pending.splice(pending.indexOf(entry), 1)
+        entry.open()
+      }
+    },
     effect(callback) {
       effects.push(callback)
       return () => {}
     },
     logger: { info() {} },
   }
+  return context
 }
 
 /** A settings-service stand-in owning one namespace and its watchers. */
@@ -281,7 +308,26 @@ test('disabling from the settings document takes the listeners off again', schem
 
 test('a profile without a settings service stays composition-only', windowsOnly, (t) => {
   const { log } = mountHost(t, {}, undefined)
-  assert.match(log(), /no settings service in this profile/)
+  assert.match(log(), /waiting for the settings service/)
+  assert.match(log(), /active \(appId=/)
+})
+
+test('a settings service that arrives after apply still gets the namespace', schemaOnly, windowsOnly, (t) => {
+  const probe = mountHost(t, {}, undefined)
+  assert.match(probe.log(), /waiting for the settings service/)
+  assert.doesNotMatch(probe.log(), /registered/)
+
+  // Now the composition mounts the provider, exactly as it does in a profile
+  // where the settings row activates after this one.
+  const settings = createFakeSettings()
+  probe.ctx.provide('settings', settings)
+  assert.equal(settings.registrations.length, 1)
+  assert.equal(settings.registrations[0].ns, 'dsh-windows-notifier')
+  assert.match(probe.log(), /settings namespace 'dsh-windows-notifier' registered/)
+
+  // ...and the namespace is live, not just registered.
+  settings.commit({ openOnClick: false })
+  assert.match(probe.log(), /reconfigured \(disappearAfterMs=6000, openOnClick=false/)
 })
 
 test('the live options reach the toast transport', schemaOnly, windowsOnly, (t) => {

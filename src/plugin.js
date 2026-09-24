@@ -454,35 +454,53 @@ export function apply(ctx, rawConfig) {
     }
   }
 
+  /**
+   * Adopt a resolved settings section: once when the settings service arrives,
+   * and again on every user edit behind it.
+   */
+  const reconfigure = (next, reason) => {
+    const previous = notifier
+    config = normalizeConfig({ ...raw, ...next })
+    notifier = createNotifier(config, log)
+    previous.dispose()
+    sync()
+    log(`${reason} (disappearAfterMs=${String(config.disappearAfterMs)}, openOnClick=${String(config.openOnClick)}, includeSubagents=${String(config.includeSubagents)})`)
+  }
+
   // The settings namespace is registered even while `enabled` is false: the
   // configuration card is how a user turns the plugin back on, so it has to
   // exist precisely when the plugin is idle. Registration is an effect of this
   // fiber, and the resolved value layers schema defaults, this row's config,
   // and the user's own overrides — in that order.
-  const settings = ctx.get('settings')
-  if (settings !== undefined && typeof settings.register === 'function' && SETTINGS_SCHEMA !== undefined) {
-    try {
-      const scope = settings.register(SETTINGS_NAMESPACE, SETTINGS_SCHEMA, {
-        base: settingsBase(composition),
-        applies: 'live',
-      })
-      config = normalizeConfig({ ...raw, ...scope.get() })
-      ctx.effect(() => scope.watch((next) => {
-        const previous = notifier
-        config = normalizeConfig({ ...raw, ...next })
-        notifier = createNotifier(config, log)
-        previous.dispose()
-        sync()
-        log(`reconfigured (disappearAfterMs=${String(config.disappearAfterMs)}, openOnClick=${String(config.openOnClick)}, includeSubagents=${String(config.includeSubagents)})`)
-      }), `${name}: settings namespace`)
-      log(`settings namespace '${SETTINGS_NAMESPACE}' registered; edit it under 设置 → 插件 → 插件配置`)
-    } catch (error) {
-      log(`settings namespace failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
+  //
+  // `ctx.inject` rather than `ctx.get`: the settings provider is a separate row
+  // of the composition and is not guaranteed to be mounted before this one, so
+  // a consumer waits for the service instead of sampling it once at apply time.
+  // DSH's own plugins open their settings section the same way.
+  if (SETTINGS_SCHEMA === undefined) {
+    log(`no ${SCHEMA_SPECIFIER} available; the settings card is off and configuration stays composition-only`)
   } else {
-    log(settings === undefined || typeof settings.register !== 'function'
-      ? 'no settings service in this profile; configuration stays composition-only'
-      : `no ${SCHEMA_SPECIFIER} available; the settings card is off and configuration stays composition-only`)
+    ctx.inject(['settings'], (settingsCtx) => {
+      const settings = settingsCtx.settings
+      if (settings === undefined || typeof settings.register !== 'function') {
+        log('the settings service provides no namespaces; configuration stays composition-only')
+        return
+      }
+      try {
+        const scope = settings.register(SETTINGS_NAMESPACE, SETTINGS_SCHEMA, {
+          base: settingsBase(composition),
+          applies: 'live',
+        })
+        reconfigure(scope.get(), 'settings applied')
+        ctx.effect(() => scope.watch((next) => reconfigure(next, 'reconfigured')), `${name}: settings namespace`)
+        log(`settings namespace '${SETTINGS_NAMESPACE}' registered; edit it under 设置 → 插件 → 插件配置`)
+      } catch (error) {
+        log(`settings namespace failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    })
+    if (ctx.get('settings') === undefined) {
+      log('waiting for the settings service; configuration stays composition-only until it appears')
+    }
   }
 
   sync()
