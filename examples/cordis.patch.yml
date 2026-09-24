@@ -1,0 +1,25 @@
+# Ready-to-paste patch entry for dsh-windows-notifier.
+#
+# Put this in ONE of:
+#   $DSH_HOME/profiles/<profile>/cordis.patch.yml   -> that profile only
+#   $DSH_HOME/cordis.patch.yml                      -> every profile on this machine
+#
+# A profile with `patchReload: live` picks the change up without a restart.
+# Every key under `config:` is optional; the commented values are the defaults.
+
+- insert:
+    - id: windows-notifier
+      name: 'dsh-windows-notifier'
+      config:
+        # enabled: true
+        # notifyOnActivate: false        # set true once to prove the channel works
+        # includeSubagents: false        # notify for subagent/workflow child sessions too
+        # notifyOnComplete: true
+        # notifyOnQuestion: true
+        # notifyOnApproval: true
+        # notifyOnError: true
+        # notifyOnInterrupted: false
+        # minTaskDurationMs: 0           # e.g. 5000 to skip short turns
+        # sound: default                 # default | silent
+        # duration: short                # short | long
+        # logFile: 'D:\dsh-windows-notifier.log'

@@ -1,0 +1,11 @@
+# Dependencies are installed by `dsh plugin --profile <name> add`, never committed.
+node_modules/
+
+# Debug output produced by the optional `logFile` option.
+*.log
+
+# Editor and OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,4 @@
+# Keep the repository byte-identical across platforms: LF in the index and in
+# the working tree. The PowerShell companion is ASCII-only by design, so it does
+# not depend on a carriage return to run.
+* text=auto eol=lf
