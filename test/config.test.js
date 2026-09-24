@@ -21,7 +21,8 @@ test('malformed values fall back instead of throwing', () => {
   const config = normalizeConfig({
     enabled: 'yes',
     sound: 'loud',
-    duration: 'eternal',
+    disappearAfterMs: 'soon',
+    openOnClick: 'yes',
     minTaskDurationMs: Number.NaN,
     maxConcurrent: 99,
     timeoutMs: 10,
@@ -29,11 +30,22 @@ test('malformed values fall back instead of throwing', () => {
   })
   assert.equal(config.enabled, true)
   assert.equal(config.sound, 'default')
-  assert.equal(config.duration, 'short')
+  assert.equal(config.disappearAfterMs, 6000)
+  assert.equal(config.openOnClick, true)
   assert.equal(config.minTaskDurationMs, 0)
   assert.equal(config.maxConcurrent, 8)
   assert.equal(config.timeoutMs, 1000)
   assert.equal(config.appId, POWERSHELL_APP_ID)
+})
+
+test('a notification lifetime of zero survives normalization', () => {
+  // 0 is the "stay until dismissed" request, not a missing value, so clamping
+  // must not mistake it for one.
+  assert.equal(normalizeConfig({ disappearAfterMs: 0 }).disappearAfterMs, 0)
+  assert.equal(normalizeConfig({ disappearAfterMs: -5000 }).disappearAfterMs, 0)
+  assert.equal(normalizeConfig({ disappearAfterMs: 25000 }).disappearAfterMs, 25000)
+  assert.equal(normalizeConfig({ disappearAfterMs: 12.6 }).disappearAfterMs, 13)
+  assert.equal(normalizeConfig({ openOnClick: false }).openOnClick, false)
 })
 
 test('blank paths fall back to auto-detection', () => {

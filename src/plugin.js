@@ -54,6 +54,7 @@ import {
   isUserVisibleSession,
 } from './messages.js'
 import { createNotifier } from './notify.js'
+import { SCHEMA_SPECIFIER, SETTINGS_NAMESPACE, SETTINGS_SCHEMA, settingsBase } from './settings.js'
 
 /** Stable plugin name; also the id a composed row refers to. */
 export const name = 'dsh-windows-notifier'
@@ -136,7 +137,12 @@ function readLastTurnOutcome(session) {
  * @param {unknown} rawConfig - the row's `config:` block, if it declared one.
  */
 export function apply(ctx, rawConfig) {
-  const config = normalizeConfig(rawConfig)
+  const raw = typeof rawConfig === 'object' && rawConfig !== null && !Array.isArray(rawConfig)
+    ? rawConfig
+    : {}
+  const composition = normalizeConfig(raw)
+  // Mutable on purpose: a live settings namespace replaces it without a reload.
+  let config = composition
 
   /** Write one diagnostic line to the Host log and, optionally, to a file. */
   const log = (message) => {
@@ -154,10 +160,6 @@ export function apply(ctx, rawConfig) {
     }
   }
 
-  if (!config.enabled) {
-    log('disabled by config')
-    return
-  }
   if (process.platform !== 'win32') {
     log(`skipped: Windows toast notifications are Windows-only (platform ${process.platform})`)
     return
@@ -165,7 +167,7 @@ export function apply(ctx, rawConfig) {
 
   const sessions = ctx.get('sessions')
   const sessionTitle = ctx.get('sessionTitle')
-  const notifier = createNotifier(config, log)
+  let notifier = createNotifier(config, log)
 
   /** Sessions seen running, so a finished turn can report its duration. */
   const runningSince = new Map()
@@ -218,15 +220,17 @@ export function apply(ctx, rawConfig) {
   /**
    * Where a click on the toast should land.
    *
-   * An explicit `launchUrl` wins and may reference `{sessionId}`. Otherwise the
-   * running Web GUI's own loopback address is used, so a click at least brings
-   * the harness forward — the GUI keeps session selection in memory and exposes
-   * no per-session route, so there is nothing deeper to link to.
+   * `openOnClick: false` makes the toast inert. Otherwise an explicit
+   * `launchUrl` wins and may reference `{sessionId}`; with no configured URL
+   * the running Web GUI's own loopback address is used, so a click at least
+   * brings the harness forward — the GUI keeps session selection in memory and
+   * exposes no per-session route, so there is nothing deeper to link to.
    *
    * @param {unknown} sessionId - the conversation the notification belongs to.
    * @returns {string} an absolute URL, or `''` to make the toast inert.
    */
   const resolveLaunchUrl = (sessionId) => {
+    if (!config.openOnClick) return ''
     if (config.launchUrl !== '') {
       return config.launchUrl.replaceAll('{sessionId}', encodeURIComponent(String(sessionId ?? '')))
     }
@@ -379,38 +383,121 @@ export function apply(ctx, rawConfig) {
     'agent/disposed': { report: forgetAgent, chain: false },
   })
 
-  // Channel 1 — the framework's dispatch stream, published before scope
-  // filtering, so this sees conversations in every scope.
-  ctx.on('internal/dispatch', (_mode, eventName, args) => {
-    const observed = OBSERVED[eventName]
-    if (observed === undefined) return
-    const payload = Array.isArray(args) ? args[0] : undefined
-    if (payload === undefined || payload === null) return
-    if (!claim(payload)) return
-    observed.report(payload)
-  }, GLOBAL)
-
-  // Channel 2 — direct listeners, the fallback when no dispatch announcement
-  // is available. They must keep the chain alive for the waterfall events.
-  for (const [eventName, observed] of Object.entries(OBSERVED)) {
-    if (!observed.chain) {
-      ctx.on(eventName, (payload) => {
+  /**
+   * Register every listener, and return one disposer for all of them.
+   *
+   * Channel 1 — the framework's dispatch stream, published before scope
+   * filtering, so this sees conversations in every scope.
+   *
+   * Channel 2 — direct listeners, the fallback when no dispatch announcement
+   * is available. They must keep the chain alive for the waterfall events.
+   *
+   * @returns {() => void} removes everything registered here.
+   */
+  const attach = () => {
+    const disposers = [
+      ctx.on('internal/dispatch', (_mode, eventName, args) => {
+        const observed = OBSERVED[eventName]
+        if (observed === undefined) return
+        const payload = Array.isArray(args) ? args[0] : undefined
+        if (payload === undefined || payload === null) return
+        if (!claim(payload)) return
+        observed.report(payload)
+      }, GLOBAL),
+    ]
+    for (const [eventName, observed] of Object.entries(OBSERVED)) {
+      if (!observed.chain) {
+        disposers.push(ctx.on(eventName, (payload) => {
+          if (claim(payload)) observed.report(payload)
+        }, GLOBAL))
+        continue
+      }
+      disposers.push(ctx.on(eventName, (payload, next) => {
         if (claim(payload)) observed.report(payload)
-      }, GLOBAL)
-      continue
+        return typeof next === 'function' ? next() : undefined
+      }, GLOBAL))
     }
-    ctx.on(eventName, (payload, next) => {
-      if (claim(payload)) observed.report(payload)
-      return typeof next === 'function' ? next() : undefined
-    }, GLOBAL)
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose?.()
+        } catch {
+          // A listener that already went away is not worth reporting.
+        }
+      }
+    }
   }
 
+  /** Disposer for the listeners currently registered, or `null` while idle. */
+  let detach = null
+
+  /**
+   * Follow `enabled`.
+   *
+   * The switch is the one option that changes whether anything is listened to
+   * at all, so it is also the one that can come back off: an idle plugin owns
+   * no listeners, and a user re-enabling it from the settings card gets them
+   * back without a reload.
+   */
+  const sync = () => {
+    if (config.enabled) {
+      if (detach === null) {
+        detach = attach()
+        log('listening')
+      }
+      return
+    }
+    if (detach !== null) {
+      detach()
+      detach = null
+      log('listening stopped: disabled')
+    }
+  }
+
+  // The settings namespace is registered even while `enabled` is false: the
+  // configuration card is how a user turns the plugin back on, so it has to
+  // exist precisely when the plugin is idle. Registration is an effect of this
+  // fiber, and the resolved value layers schema defaults, this row's config,
+  // and the user's own overrides — in that order.
+  const settings = ctx.get('settings')
+  if (settings !== undefined && typeof settings.register === 'function' && SETTINGS_SCHEMA !== undefined) {
+    try {
+      const scope = settings.register(SETTINGS_NAMESPACE, SETTINGS_SCHEMA, {
+        base: settingsBase(composition),
+        applies: 'live',
+      })
+      config = normalizeConfig({ ...raw, ...scope.get() })
+      ctx.effect(() => scope.watch((next) => {
+        const previous = notifier
+        config = normalizeConfig({ ...raw, ...next })
+        notifier = createNotifier(config, log)
+        previous.dispose()
+        sync()
+        log(`reconfigured (disappearAfterMs=${String(config.disappearAfterMs)}, openOnClick=${String(config.openOnClick)}, includeSubagents=${String(config.includeSubagents)})`)
+      }), `${name}: settings namespace`)
+      log(`settings namespace '${SETTINGS_NAMESPACE}' registered; edit it under 设置 → 插件 → 插件配置`)
+    } catch (error) {
+      log(`settings namespace failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  } else {
+    log(settings === undefined || typeof settings.register !== 'function'
+      ? 'no settings service in this profile; configuration stays composition-only'
+      : `no ${SCHEMA_SPECIFIER} available; the settings card is off and configuration stays composition-only`)
+  }
+
+  sync()
+  if (!config.enabled) log('disabled by config')
+
   ctx.effect(() => () => {
+    if (detach !== null) {
+      detach()
+      detach = null
+    }
     runningSince.clear()
     notifier.dispose()
   }, `${name}: toast transport`)
 
-  log(`active (appId=${config.appId}, includeSubagents=${String(config.includeSubagents)})`)
+  log(`active (appId=${config.appId}, includeSubagents=${String(config.includeSubagents)}, disappearAfterMs=${String(config.disappearAfterMs)}, openOnClick=${String(config.openOnClick)})`)
   if (config.notifyOnActivate) {
     notifier.send('🔔 dsh-windows-notifier 已启用', ['从现在起，任何对话需要你时都会弹出通知。'], resolveLaunchUrl(undefined))
   }

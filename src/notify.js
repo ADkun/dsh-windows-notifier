@@ -101,7 +101,7 @@ export function createNotifier(options, log) {
         '-Body', lines.join('\n'),
         '-AppId', options.appId,
         '-Sound', options.sound,
-        '-Duration', options.duration,
+        '-DisappearAfterMs', String(options.disappearAfterMs),
       ]
       if (typeof launch === 'string' && launch !== '') args.push('-Launch', launch)
       child = spawn(powershellPath, args, { stdio: 'ignore', windowsHide: true })

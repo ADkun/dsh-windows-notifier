@@ -15,7 +15,7 @@ param(
     [string] $Body = '',
     [string] $AppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe',
     [ValidateSet('default', 'silent')][string] $Sound = 'default',
-    [ValidateSet('short', 'long')][string] $Duration = 'short',
+    [int] $DisappearAfterMs = 6000,
     [string] $Launch = ''
 )
 
@@ -48,7 +48,22 @@ if (-not [string]::IsNullOrWhiteSpace($Launch)) {
     $activation = ' activationType="protocol" launch="' + (ConvertTo-XmlText -Value $Launch) + '"'
 }
 
-$xmlText = '<toast duration="' + $Duration + '"' + $activation + '>' +
+# How long a toast lives is a Windows decision, not a free parameter: the banner
+# has exactly two steps (short ~5s, long ~25s), and `scenario="reminder"` is the
+# only way to keep it on screen until the user dismisses it. So a requested
+# lifetime picks the nearest banner step, while the Action Center copy is
+# removed at the exact requested time through ExpirationTime.
+$duration = 'short'
+$scenario = ''
+$expirationMs = 0
+if ($DisappearAfterMs -le 0) {
+    $scenario = ' scenario="reminder"'
+} else {
+    if ($DisappearAfterMs -gt 7000) { $duration = 'long' }
+    $expirationMs = $DisappearAfterMs
+}
+
+$xmlText = '<toast duration="' + $duration + '"' + $scenario + $activation + '>' +
     '<visual><binding template="ToastGeneric">' + $textNodes + '</binding></visual>' +
     $audio + '</toast>'
 
@@ -56,4 +71,7 @@ $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
 $xml.LoadXml($xmlText)
 
 $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+if ($expirationMs -gt 0) {
+    $toast.ExpirationTime = [System.DateTimeOffset]::Now.AddMilliseconds($expirationMs)
+}
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppId).Show($toast)

@@ -21,6 +21,11 @@
         # notifyOnInterrupted: false
         # minTaskDurationMs: 0           # e.g. 5000 to skip short turns
         # sound: default                 # default | silent
-        # duration: short                # short | long
+        # disappearAfterMs: 6000         # 0 = stay on screen until dismissed (scenario="reminder")
+        # openOnClick: true              # false makes the toast inert
         # launchUrl: 'http://127.0.0.1:3080'   # default: the running Web GUI's own address
         # logFile: 'D:\dsh-windows-notifier.log'
+        #
+        # These keys (and the ones above) are also editable at runtime under
+        # Settings -> Plugins -> Plugin configuration; a value saved there lives
+        # in $DSH_HOME/settings.yaml and wins over this config block.

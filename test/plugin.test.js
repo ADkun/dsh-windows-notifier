@@ -327,3 +327,22 @@ test('a toast links to the running Web GUI unless a URL is configured', windowsO
   fire(inert.ctx, ...idle(session.header.id))
   assert.doesNotMatch(inert.log(), /->/)
 })
+
+test('openOnClick false makes the toast inert even with a URL configured', windowsOnly, (t) => {
+  const session = fakeSession({
+    id: 'session-44445555-6666',
+    events: [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    ],
+  })
+
+  const closed = mount(t, { session }, { openOnClick: false, launchUrl: 'http://example.test/{sessionId}' })
+  fire(closed.ctx, ...idle(session.header.id))
+  assert.match(closed.log(), /notify complete/)
+  assert.doesNotMatch(closed.log(), /->/)
+
+  const opened = mount(t, { session }, { openOnClick: true, launchUrl: 'http://example.test/{sessionId}' })
+  fire(opened.ctx, ...idle(session.header.id))
+  assert.match(opened.log(), /-> http:\/\/example\.test\/session-44445555-6666/)
+})

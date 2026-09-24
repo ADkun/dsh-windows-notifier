@@ -109,7 +109,9 @@ New-Item -ItemType Junction `
 ### 改配置 vs 改源码：热加载的边界
 
 - **改 patch 文件**（开关、`logFile`、`launchUrl`…）→ `patchReload: live` 会立刻重挂载，马上生效。
+- **改界面里的设置**（设置 → 插件 → 插件配置）→ 立刻生效，见下面「界面化配置」。
 - **改插件源码** → **不会**立即生效。DSH 的 loader 按「模块解析后的路径」缓存 ESM 模块，并且在插件行的 `name` 没变时复用已经加载过的那个模块；同一个文件路径改内容也不会重新导入。要让新代码生效，要么重启对应 profile，要么把包放到一个**新路径**（换个目录、或复制一份到别处）再让行指向它。
+  浏览器半侧同理，而且更严格：客户端模块图按「解析后的说明符」缓存包元数据（包括"没有浏览器半侧"的否定结论），所以连"换个新路径的插件行"这条路也不通（实测：改成子路径说明符后这一行会导入失败），**只能重启一次**。
 
 > 上面「目录联接」的写法适合开发：联接指向仓库时，增删**文件**（路径变化）就能被重新导入，改同一个文件则不行。
 
@@ -129,7 +131,8 @@ New-Item -ItemType Junction `
 | `notifyOnInterrupted` | boolean | `false` | 本轮被中止时通知 |
 | `minTaskDurationMs` | number | `0` | 短于该时长的任务不通知（避免零星小任务刷屏），例如 `5000` |
 | `sound` | `default` \| `silent` | `default` | 是否播放通知音 |
-| `duration` | `short` \| `long` | `short` | 通知停留时长（约 5 秒 / 25 秒） |
+| `disappearAfterMs` | number | `6000` | 通知停留时长（毫秒）；`0` = 一直留在屏幕上，直到你手动关掉 |
+| `openOnClick` | boolean | `true` | 点击通知时打开 DSH Web 界面；`false` 让通知不可点击 |
 | `appId` | string | Windows PowerShell 的 AUMID | 通知归属的应用标识；换成你注册过的 AUMID 就能改显示名 |
 | `powershellPath` | string | 自动探测 | 指定 `powershell.exe` 路径（必须是 Windows PowerShell 5.1，`pwsh` 7 不支持 WinRT） |
 | `scriptPath` | string | 包内 `scripts/toast.ps1` | 指定自定义通知脚本 |
@@ -137,6 +140,17 @@ New-Item -ItemType Junction `
 | `logFile` | string | 空 | 追加调试日志到文件，排查用 |
 | `maxConcurrent` | number | `1` | 同时运行的 powershell 进程上限 |
 | `timeoutMs` | number | `15000` | 单个通知进程的超时时间 |
+
+> **「停留时长」能做的事，受 Windows 自己限制。** 横幅时长只有「约 5 秒 / 约 25 秒」两档，插件只能按 `disappearAfterMs` 选最近的一档（> 7000 用长档）；这个值同时通过 `ExpirationTime` 决定它**在通知中心里保留多久**，所以写 3000 并不会让横幅 3 秒就走。要让通知「无限等待」，用 `0`：插件会带上 `scenario="reminder"`，通知就一直留在屏幕上直到你手动关闭——这是 Windows 上唯一能做到这件事的方式。
+
+## 界面化配置
+
+插件注册了一个 settings 命名空间 `dsh-windows-notifier`，并在 Web 界面的 **设置 → 插件 → 插件配置** 里贡献一张卡片。常用的开关都在卡片上：总开关、五类通知开关、停留时长、是否跳转、通知音、忽略短任务、点击地址。
+
+- 卡片里保存的值写进 `$DSH_HOME/settings.yaml`，**优先级高于** patch 里的 `config:`；卡片上的「重置」让该字段重新继承 patch 的值。
+- 保存后**立刻生效**，不用重启：`enabled` 关掉会真的把监听摘掉，重新打开再挂回去。
+- 卡片是插件的**浏览器半侧**（`src/client.js`），按 DSH 的 lazy-CJS 客户端模块格式手写，所以仓库仍然零构建。注册命名空间需要 `@deepseek-ai/schemastery`（harness 自带）；环境里没有它时插件照常工作，只是没有这张卡片。
+- 装好后**需要重启一次 DSH** 卡片才会出现：客户端模块图按「解析后的说明符」缓存包元数据，其中也包括"这个包没有浏览器半侧"这个结论，所以新声明的浏览器半侧要等下一次启动才进入引导图。
 
 ## 验证
 
@@ -166,7 +180,8 @@ skip question: switch off
 ## 卸载
 
 1. 从 patch 文件里删掉那一行（或加 `disabled: true`）；
-2. `dsh plugin --profile web remove dsh-windows-notifier`（手动放的目录直接删掉）。
+2. `dsh plugin --profile web remove dsh-windows-notifier`（手动放的目录直接删掉）；
+3. 顺手可以删掉 `$DSH_HOME/settings.yaml` 里残留的 `dsh-windows-notifier:` 分节（不删也无害，它只是没人读）。
 
 ## 已知限制
 
@@ -175,21 +190,26 @@ skip question: switch off
 - **通知显示的应用名是「Windows PowerShell」**：因为用的是它现成的 AUMID，好处是零安装。想改成自己的名字，需要注册一个带 `AppUserModelID` 的开始菜单快捷方式，然后把 `appId` 指过去。
 - **每条通知会短暂启动一个 `powershell.exe`**（约 0.3–1 秒）。对「一轮任务结束」这种频率完全够用；这也是它不需要任何依赖的代价。
 - **必须在有 DSH 事件的前提下工作**：headless / sdk 这类最小 profile 如果不发这些事件，插件会挂载但不产生通知。headless 收尾时会话可能已经 detach，这种情况下插件仍按「完成」通知（`idle` 只会在状态变化时发布，所以它本身就意味着有东西跑完过）。
-- **点击通知只能打开 GUI 首页**：DSH 的 Web GUI 把会话选择放在内存里，没有会话级路由，所以没有可深链的地址。`launchUrl` 里写 `{sessionId}` 会被替换，但目标页面目前不消费它。
+- **点击通知只能打开 GUI 首页**：DSH 的 Web GUI 把会话选择放在内存里，没有会话级路由，所以没有可深链的地址。`launchUrl` 里写 `{sessionId}` 会被替换，但目标页面目前不消费它。不想要这个跳转就把 `openOnClick` 关掉（patch 或界面里都行）。
+- **横幅时长只有两档**：见上面配置项下的说明；`0` 是唯一能"无限等待"的值（`scenario="reminder"`）。
+- **界面卡片的文案只有中文**：插件没有注册 locale 词典，卡片上的文案是写死的（用户是中文用户，README 也是中文优先）。要双语的话得再注册一个 locale 命名空间。
 - 通知不做「用户是否正在看这个会话」的判断 —— 前台会话结束同样会弹。
 
 ## 开发
 
 ```powershell
-node --test test        # 29 项测试，覆盖消息文案、配置归一化、事件接线、双通道去重
+node --test test        # 55 项测试：消息文案、配置归一化、事件接线、双通道去重、
+                        # settings 命名空间与实时改配置、浏览器半侧的卡片契约与暂存/保存
 ```
 
 仓库结构：
 
 ```
-src/plugin.js      插件本体：观察派发流 + 直接监听，决定要不要通知
+src/plugin.js      插件本体：观察派发流 + 直接监听，决定要不要通知，并跟随界面设置
 src/messages.js    纯函数：会话过滤、文案、时长格式化
 src/config.js      配置归一化（任何脏值都回退到默认值，不炸 profile）
+src/settings.js    settings 命名空间：卡片能改哪些选项、默认值、组合层 base
+src/client.js      浏览器半侧：手写的 lazy-CJS bundle，注册「插件配置」里的卡片
 src/notify.js      Windows Toast 传输层：队列 + powershell 进程生命周期
 scripts/toast.ps1  WinRT 弹窗脚本（纯 ASCII，中文通过参数以 UTF-16 传入）
 scripts/send-test-toast.mjs  手动验证通道
@@ -197,10 +217,19 @@ scripts/send-test-toast.mjs  手动验证通道
 
 ## English
 
-`dsh-windows-notifier` is a zero-dependency, zero-build DSH host plugin that raises a native
-Windows toast whenever **any** conversation in the process hands control back to you: a turn
-finished, the agent asked a question, an approval is pending, or a step errored. Subagent and
-workflow child sessions are filtered out by default.
+`dsh-windows-notifier` is a zero-build DSH plugin that raises a native Windows toast whenever
+**any** conversation in the process hands control back to you: a turn finished, the agent asked a
+question, an approval is pending, or a step errored. Subagent and workflow child sessions are
+filtered out by default. It depends on nothing you have to install: the Windows side is Windows
+PowerShell's built-in WinRT `Windows.UI.Notifications`, and the settings schema comes from the
+harness's own `@deepseek-ai/schemastery`.
+
+Its common switches are editable at **Settings → Plugins → Plugin configuration**, which writes to
+`$DSH_HOME/settings.yaml` and applies live — including the notification lifetime (`0` means "stay
+until dismissed") and whether a click opens the Web GUI. That card is the plugin's browser half,
+hand-written in DSH's lazy-CJS client-module format, so this repository still needs no build step.
+Note that a browser half only enters the web boot graph at startup: the client module graph caches
+per-package metadata per resolved specifier, so **restart DSH once** after installing.
 
 DSH dispatches those events through a *scope carrier*, and Cordis drops listeners whose context
 is outside the carrier's scope chain — a plain root-context listener sees `agent/status` but never

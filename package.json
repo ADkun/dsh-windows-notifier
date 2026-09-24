@@ -15,9 +15,25 @@
   "main": "src/plugin.js",
   "exports": {
     ".": "./src/plugin.js",
+    "./client": "./src/client.js",
     "./messages": "./src/messages.js",
     "./config": "./src/config.js",
+    "./settings": "./src/settings.js",
+    "./src/*": "./src/*",
     "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "3.x"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   },
   "files": [
     "src",

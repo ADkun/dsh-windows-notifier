@@ -43,8 +43,17 @@ export const DEFAULT_CONFIG = Object.freeze({
   minTaskDurationMs: 0,
   /** `default` plays the standard toast sound, `silent` mutes it. */
   sound: 'default',
-  /** `short` (~5s) or `long` (~25s) on-screen duration. */
-  duration: 'short',
+  /**
+   * How long a notification should stay around, in milliseconds.
+   *
+   * `0` means "do not disappear on its own": the toast stays on screen until
+   * the user dismisses it. Any other value selects the nearest banner step
+   * Windows supports (~5s / ~25s) and removes the Action Center copy at
+   * exactly this time.
+   */
+  disappearAfterMs: 6000,
+  /** Whether a click on the toast opens the Web GUI. */
+  openOnClick: true,
   /** `AppUserModelID` the toast is shown under. */
   appId: POWERSHELL_APP_ID,
   /** Explicit `powershell.exe` path; empty auto-detects the Windows one. */
@@ -116,7 +125,8 @@ export function normalizeConfig(raw) {
     notifyOnInterrupted: readBoolean(input.notifyOnInterrupted, DEFAULT_CONFIG.notifyOnInterrupted),
     minTaskDurationMs: clamp(readNumber(input.minTaskDurationMs, DEFAULT_CONFIG.minTaskDurationMs), 0, 86_400_000),
     sound: readEnum(input.sound, ['default', 'silent'], DEFAULT_CONFIG.sound),
-    duration: readEnum(input.duration, ['short', 'long'], DEFAULT_CONFIG.duration),
+    disappearAfterMs: clamp(Math.round(readNumber(input.disappearAfterMs, DEFAULT_CONFIG.disappearAfterMs)), 0, 86_400_000),
+    openOnClick: readBoolean(input.openOnClick, DEFAULT_CONFIG.openOnClick),
     appId: readText(input.appId) ?? DEFAULT_CONFIG.appId,
     powershellPath: readText(input.powershellPath) ?? DEFAULT_CONFIG.powershellPath,
     scriptPath: readText(input.scriptPath) ?? DEFAULT_CONFIG.scriptPath,
