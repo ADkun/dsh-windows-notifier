@@ -114,6 +114,16 @@ New-Item -ItemType Junction `
 
 插件本身零依赖、零构建，所以不需要 `npm install` / `pnpm install`。
 
+### 同步已部署的副本
+
+用「复制」而不是「联接」部署时，仓库的改动**不会**自己走进 profile —— 复制过去的那份是个快照，而 DSH 也不会提示你它已经旧了。这正是「仓库里修好了、环境里照旧弹通知」这类问题的成因。改完源码后跑一次：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\sync-to-profile.ps1
+```
+
+它按 `package.json` 的 `files` 字段（也就是 npm 实际发布的那几个条目）重建 `$DSH_HOME/profiles/node_modules/dsh-windows-notifier`；如果那个路径本来是目录联接，它会直接告诉你不用同步。默认用 `$env:DSH_HOME`，也可以用 `-ProfilesRoot` 指别处。
+
 ### 改配置 vs 改源码：热加载的边界
 
 - **改 patch 文件**（开关、`logFile`、`launchUrl`…）→ `patchReload: live` 会立刻重挂载，马上生效。
@@ -122,6 +132,8 @@ New-Item -ItemType Junction `
   浏览器半侧同理，而且更严格：客户端模块图按「解析后的说明符」缓存包元数据（包括"没有浏览器半侧"的否定结论），所以连"换个新路径的插件行"这条路也不通（实测：改成子路径说明符后这一行会导入失败），**只能重启一次**。
 
 > 上面「目录联接」的写法适合开发：联接指向仓库时，增删**文件**（路径变化）就能被重新导入，改同一个文件则不行。
+>
+> 复制式部署则连这半条路都没有：源码改完记得跑 `scripts/sync-to-profile.ps1` 刷新副本，再重启。副本不会自己更新，也不会告诉你它旧了。
 
 ## 配置项
 
@@ -222,6 +234,7 @@ src/client.js      浏览器半侧：手写的 lazy-CJS bundle，注册「插件
 src/notify.js      Windows Toast 传输层：队列 + powershell 进程生命周期
 scripts/toast.ps1  WinRT 弹窗脚本（纯 ASCII，中文通过参数以 UTF-16 传入）
 scripts/send-test-toast.mjs  手动验证通道
+scripts/sync-to-profile.ps1  把仓库同步到 profile 的 node_modules（复制式部署用）
 ```
 
 ## English
