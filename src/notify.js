@@ -55,7 +55,7 @@ export function createNotifier(options, log) {
   const scriptPath = options.scriptPath === '' ? DEFAULT_SCRIPT_PATH : options.scriptPath
   const powershellPath = resolvePowershellPath(options.powershellPath)
 
-  /** @type {Array<{ title: string, lines: string[] }>} */
+  /** @type {Array<{ title: string, lines: string[], launch: string }>} */
   const queue = []
   /** @type {Set<import('node:child_process').ChildProcess>} */
   const live = new Set()
@@ -88,25 +88,23 @@ export function createNotifier(options, log) {
    * ampersands, or CJK text reaches PowerShell verbatim; only the XML inside
    * the script needs escaping.
    */
-  function run({ title, lines }) {
+  function run({ title, lines, launch }) {
     /** @type {import('node:child_process').ChildProcess} */
     let child
     try {
-      child = spawn(
-        powershellPath,
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-ExecutionPolicy', 'Bypass',
-          '-File', scriptPath,
-          '-Title', title,
-          '-Body', lines.join('\n'),
-          '-AppId', options.appId,
-          '-Sound', options.sound,
-          '-Duration', options.duration,
-        ],
-        { stdio: 'ignore', windowsHide: true },
-      )
+      const args = [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Title', title,
+        '-Body', lines.join('\n'),
+        '-AppId', options.appId,
+        '-Sound', options.sound,
+        '-Duration', options.duration,
+      ]
+      if (typeof launch === 'string' && launch !== '') args.push('-Launch', launch)
+      child = spawn(powershellPath, args, { stdio: 'ignore', windowsHide: true })
     } catch (error) {
       active -= 1
       log(`failed to start powershell: ${error instanceof Error ? error.message : String(error)}`)
@@ -147,10 +145,11 @@ export function createNotifier(options, log) {
      *
      * @param {string} title - the bold first toast line.
      * @param {string[]} lines - the body lines, one `<text>` element each.
+     * @param {string} [launch] - URL a click on the toast opens.
      */
-    send(title, lines) {
+    send(title, lines, launch = '') {
       if (disposed) return
-      queue.push({ title, lines })
+      queue.push({ title, lines, launch })
       pump()
     },
     /** Drop the queue and terminate every running notification process. */

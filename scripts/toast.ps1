@@ -15,7 +15,8 @@ param(
     [string] $Body = '',
     [string] $AppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe',
     [ValidateSet('default', 'silent')][string] $Sound = 'default',
-    [ValidateSet('short', 'long')][string] $Duration = 'short'
+    [ValidateSet('short', 'long')][string] $Duration = 'short',
+    [string] $Launch = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,7 +42,13 @@ if (-not [string]::IsNullOrWhiteSpace($Body)) {
 $audio = ''
 if ($Sound -eq 'silent') { $audio = '<audio silent="true" />' }
 
-$xmlText = '<toast duration="' + $Duration + '">' +
+# A protocol launch turns a click into "open this URL in the default browser".
+$activation = ''
+if (-not [string]::IsNullOrWhiteSpace($Launch)) {
+    $activation = ' activationType="protocol" launch="' + (ConvertTo-XmlText -Value $Launch) + '"'
+}
+
+$xmlText = '<toast duration="' + $Duration + '"' + $activation + '>' +
     '<visual><binding template="ToastGeneric">' + $textNodes + '</binding></visual>' +
     $audio + '</toast>'
 

@@ -48,3 +48,12 @@ test('explicit paths are trimmed and kept', () => {
   assert.equal(config.powershellPath, 'C:\\ps\\powershell.exe')
   assert.equal(config.logFile, 'D:\\dsn.log')
 })
+
+test('the launch URL is optional and kept verbatim when given', () => {
+  assert.equal(normalizeConfig({}).launchUrl, '')
+  assert.equal(normalizeConfig({ launchUrl: '   ' }).launchUrl, '')
+  assert.equal(
+    normalizeConfig({ launchUrl: ' http://127.0.0.1:3080/?session={sessionId} ' }).launchUrl,
+    'http://127.0.0.1:3080/?session={sessionId}',
+  )
+})

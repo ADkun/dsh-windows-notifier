@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply } from '../src/index.js'
+import { apply } from '../src/plugin.js'
 
 /** The plugin short-circuits off Windows, so the wiring tests are Windows-only. */
 const windowsOnly = { skip: process.platform !== 'win32' ? 'Windows-only plugin' : false }
@@ -41,9 +41,9 @@ function createFakeContext(services) {
   return {
     listeners,
     effects,
-    on(event, handler) {
+    on(event, handler, options) {
       const bucket = listeners.get(event) ?? []
-      bucket.push(handler)
+      bucket.push({ handler, options })
       listeners.set(event, bucket)
       return () => {}
     },
@@ -60,15 +60,32 @@ function createFakeContext(services) {
 
 /** Invoke every listener registered for one event and collect their results. */
 function fire(ctx, event, ...args) {
-  return (ctx.listeners.get(event) ?? []).map((handler) => handler(...args))
+  return (ctx.listeners.get(event) ?? []).map(({ handler }) => handler(...args))
+}
+
+/**
+ * Emulate the framework for one occurrence: announce the dispatch (which is
+ * what the plugin actually relies on), then run the direct listeners.
+ *
+ * @param ctx - the fake context.
+ * @param mode - the Cordis dispatch mode.
+ * @param event - the event name.
+ * @param args - the arguments the event is dispatched with.
+ * @param direct - whether the direct listeners also see it; `false` stands in
+ *   for a runtime whose scope filter drops them.
+ */
+function emit(ctx, mode, event, args, direct = true) {
+  fire(ctx, 'internal/dispatch', mode, event, args, null)
+  if (direct) fire(ctx, event, ...args)
 }
 
 /** Compose the plugin over one fake session and return the probe surface. */
-function mount(t, { session, title = '重构支付模块' }, config = {}) {
+function mount(t, { session, title = '重构支付模块' }, config = {}, extraServices = {}) {
   const logFile = createLogFile(t)
   const ctx = createFakeContext({
     sessions: { get: (id) => (session !== undefined && session.header.id === id ? session : undefined) },
     sessionTitle: { get: () => ({ title }) },
+    ...extraServices,
   })
   // A missing toast script makes the transport a logged no-op, so no
   // powershell.exe is started while the notification decisions stay observable.
@@ -106,6 +123,17 @@ test('a session that never settled a turn is left alone', windowsOnly, (t) => {
   fire(ctx, ...idle(session.header.id))
 
   assert.doesNotMatch(log(), /notify complete/)
+})
+
+test('an unattached session still reports completion', windowsOnly, (t) => {
+  // A headless run detaches its session during shutdown, so the idle event can
+  // arrive with nothing left to read the turn outcome from.
+  const { ctx, log } = mount(t, {})
+
+  fire(ctx, ...idle('session-headless-0001'))
+
+  assert.match(log(), /not attached/)
+  assert.match(log(), /notify complete: ✅ 对话已完成 \/ 会话 headless \| 可以继续对话了。/)
 })
 
 test('an errored turn does not also report completion', windowsOnly, (t) => {
@@ -213,4 +241,89 @@ test('the transport is owned by the context and released on dispose', windowsOnl
   const disposer = ctx.effects[0]()
   assert.equal(typeof disposer, 'function')
   assert.doesNotThrow(disposer)
+})
+
+test('every listener is global, so scope routing can never drop it', windowsOnly, (t) => {
+  const session = fakeSession({ id: 'session-66661111-2222', events: [] })
+  const { ctx } = mount(t, { session })
+
+  const observed = [
+    'internal/dispatch',
+    'agent/status',
+    'agent/error',
+    'user-questions/request',
+    'approval/request',
+    'agent/disposed',
+  ]
+  assert.deepEqual([...ctx.listeners.keys()].sort(), [...observed].sort())
+  for (const event of observed) {
+    const bucket = ctx.listeners.get(event)
+    assert.equal(bucket.length, 1, `${event} has one listener`)
+    assert.equal(bucket[0].options?.global, true, `${event} is registered as a global listener`)
+  }
+})
+
+test('an event the scope carrier hides from direct listeners still notifies', windowsOnly, (t) => {
+  const session = fakeSession({ id: 'session-11112222-3333', events: [] })
+  const { ctx, log } = mount(t, { session })
+
+  // `direct: false` stands in for the real runtime, where this listener never
+  // runs because the dispatch carries a scope carrier that excludes it — the
+  // dispatch announcement is then the only observable signal.
+  emit(ctx, 'waterfall', 'user-questions/request', [
+    { agent: { id: session.header.id }, questions: [{ question: '部署到哪个环境？' }] },
+    () => 'downstream',
+  ], false)
+
+  assert.match(log(), /notify question: ❓ 需要你的输入 \/ 重构支付模块 \| 部署到哪个环境？/)
+})
+
+test('an occurrence seen on both channels is reported exactly once', windowsOnly, (t) => {
+  const session = fakeSession({
+    id: 'session-22223333-4444',
+    events: [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    ],
+  })
+  const { ctx, log } = mount(t, { session })
+
+  // Both channels deliver the identical payload object, which is what makes
+  // de-duplication exact instead of a timing guess.
+  emit(ctx, 'emit', 'agent/status', [{ agent: { id: session.header.id }, status: 'idle' }])
+
+  assert.equal((log().match(/notify complete/g) ?? []).length, 1)
+})
+
+test('a waterfall still reaches downstream listeners after being reported', windowsOnly, (t) => {
+  const session = fakeSession({ id: 'session-33334444-5555', events: [] })
+  const { ctx } = mount(t, { session })
+  const request = { agent: { id: session.header.id }, questions: [{ question: '继续吗？' }] }
+
+  fire(ctx, 'internal/dispatch', 'waterfall', 'user-questions/request', [request, () => {}], null)
+  const results = fire(ctx, 'user-questions/request', request, () => 'downstream')
+
+  assert.deepEqual(results, ['downstream'])
+})
+
+test('a toast links to the running Web GUI unless a URL is configured', windowsOnly, (t) => {
+  const session = fakeSession({
+    id: 'session-55551111-2222',
+    events: [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    ],
+  })
+
+  const derived = mount(t, { session }, {}, { webServer: { port: 3080 } })
+  fire(derived.ctx, ...idle(session.header.id))
+  assert.match(derived.log(), /-> http:\/\/127\.0\.0\.1:3080/)
+
+  const configured = mount(t, { session }, { launchUrl: 'http://example.test/#{sessionId}' })
+  fire(configured.ctx, ...idle(session.header.id))
+  assert.match(configured.log(), /-> http:\/\/example\.test\/#session-55551111-2222/)
+
+  const inert = mount(t, { session })
+  fire(inert.ctx, ...idle(session.header.id))
+  assert.doesNotMatch(inert.log(), /->/)
 })

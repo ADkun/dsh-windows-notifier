@@ -24,17 +24,30 @@
 DSH 进程
   └─ host 组合（所有 profile 共用）
        └─ dsh-windows-notifier  ← 这一个插件行
-            ├─ ctx.on('agent/status', …)          所有会话的 running ⇄ idle
-            ├─ ctx.on('user-questions/request', …) 所有会话的提问
-            ├─ ctx.on('approval/request', …)       所有会话的审批
-            └─ ctx.on('agent/error', …)            所有会话的错误
+            ├─ ctx.on('internal/dispatch', …)   框架的派发公告（事件名 + 载荷）
+            └─ ctx.on('agent/status' | 'user-questions/request' | …)  直接监听（兜底）
                      │
                      └─ 一个短命的 powershell.exe → Windows Toast（WinRT）
 ```
 
-- **所有对话都能收到**：DSH 的事件按 scope 路由，同时把「未打作用域标签」的监听器视为全局监听器。这个插件挂在 host 根上下文，所以每个会话（含后台会话）的事件都会到达它。
+### 为什么要听两个通道
+
+DSH 的作用域事件（`agent/status`、`user-questions/request`、`approval/request`、`agent/error`）是**带作用域载体**派发的：Cordis 会把「上下文不在该载体作用域链上」的监听器直接丢掉。
+
+这个过滤是真实可观测的：挂在 host 根上下文上的普通监听器能收到 `agent/status`，却**收不到** `user-questions/request` —— 后者以提问的那个 agent 自身作为作用域键，而派发确实发生了，只是监听器被滤掉了（用 `ctx.on('internal/dispatch', …)` 能看到这次 waterfall 派发，但自己的监听器不响）。
+
+所以插件同时观察两条通道：
+
+1. **`internal/dispatch`** —— 框架自己的派发公告。任何非 `internal/` 事件都会在**作用域过滤之前**在这里公布一次，因此用 `{ global: true }` 注册的监听器能看到**所有作用域**的事件。这是「监听任意对话（含后台对话）」唯一可靠的入口（DSH 自己的 scope-invariant 插件也是这么监听的）。
+2. **直接监听那四个事件** —— 兜底：万一某个版本不再公布派发流，直接监听仍然生效。
+
+两条通道拿到的是**同一个载荷对象**，因此用一个 `WeakSet` 按对象身份去重：谁先到谁负责通知，另一条通道直接跳过 —— 不需要拍脑袋定一个时间窗。
+
+其余特性：
+
 - **零依赖**：通知由 `scripts/toast.ps1` 通过 Windows PowerShell 自带的 WinRT `Windows.UI.Notifications` 类型弹出，不需要装 BurntToast、不需要注册 COM、不需要常驻进程。
-- **不阻塞任何东西**：四个监听器都只是旁观。通知进程异步启动，并带并发上限；插件卸载时会杀掉还在跑的进程。
+- **不阻塞任何东西**：所有监听器都只是旁观。追问/审批那条监听器仍会调用 `next()` 把瀑布链传下去，所以正常问答完全不受影响（有测试专门盯着这点）。通知进程异步启动并带并发上限，插件卸载时会杀掉还在跑的进程。
+- **点击通知**可以打开 DSH 的 Web GUI（自动读取当前 Web 服务端口，也可用 `launchUrl` 指定）。GUI 目前没有会话级路由，所以只能打开到首页。
 
 ## 安装
 
@@ -93,6 +106,13 @@ New-Item -ItemType Junction `
 
 插件本身零依赖、零构建，所以不需要 `npm install` / `pnpm install`。
 
+### 改配置 vs 改源码：热加载的边界
+
+- **改 patch 文件**（开关、`logFile`、`launchUrl`…）→ `patchReload: live` 会立刻重挂载，马上生效。
+- **改插件源码** → **不会**立即生效。DSH 的 loader 按「模块解析后的路径」缓存 ESM 模块，并且在插件行的 `name` 没变时复用已经加载过的那个模块；同一个文件路径改内容也不会重新导入。要让新代码生效，要么重启对应 profile，要么把包放到一个**新路径**（换个目录、或复制一份到别处）再让行指向它。
+
+> 上面「目录联接」的写法适合开发：联接指向仓库时，增删**文件**（路径变化）就能被重新导入，改同一个文件则不行。
+
 ## 配置项
 
 全部可省略，省略即用默认值。
@@ -113,6 +133,7 @@ New-Item -ItemType Junction `
 | `appId` | string | Windows PowerShell 的 AUMID | 通知归属的应用标识；换成你注册过的 AUMID 就能改显示名 |
 | `powershellPath` | string | 自动探测 | 指定 `powershell.exe` 路径（必须是 Windows PowerShell 5.1，`pwsh` 7 不支持 WinRT） |
 | `scriptPath` | string | 包内 `scripts/toast.ps1` | 指定自定义通知脚本 |
+| `launchUrl` | string | 空（自动取当前 Web GUI 地址） | 点击通知打开的地址；支持 `{sessionId}` 占位符 |
 | `logFile` | string | 空 | 追加调试日志到文件，排查用 |
 | `maxConcurrent` | number | `1` | 同时运行的 powershell 进程上限 |
 | `timeoutMs` | number | `15000` | 单个通知进程的超时时间 |
@@ -130,6 +151,18 @@ node scripts/send-test-toast.mjs "自定义标题" "自定义正文"
 
 再验证插件本身：在配置里加 `notifyOnActivate: true`（或 `logFile: D:\dsn.log`），保存 patch 文件触发热加载，应该立刻弹出一条「已启用」通知 / 日志里出现 `[dsh-windows-notifier] active`。
 
+`logFile` 会记录**每一次决定**，包括每一次"没通知"的原因，例如：
+
+```
+notify complete: ✅ 对话已完成 / 重构支付模块 | 已运行 2 分 13 秒，可以继续对话了。 -> http://127.0.0.1:3080
+skip complete for session-…: not a user-visible conversation
+skip complete for session-…: attached session has no settled turn
+session … is not attached; reporting completion without a turn outcome
+skip question: switch off
+```
+
+「为什么没弹」基本都能在这几行里找到答案。
+
 ## 卸载
 
 1. 从 patch 文件里删掉那一行（或加 `disabled: true`）；
@@ -141,19 +174,20 @@ node scripts/send-test-toast.mjs "自定义标题" "自定义正文"
 - **专注助手（Focus Assist）/「请勿打扰」会拦掉通知**：这是系统行为，插件无法绕过。
 - **通知显示的应用名是「Windows PowerShell」**：因为用的是它现成的 AUMID，好处是零安装。想改成自己的名字，需要注册一个带 `AppUserModelID` 的开始菜单快捷方式，然后把 `appId` 指过去。
 - **每条通知会短暂启动一个 `powershell.exe`**（约 0.3–1 秒）。对「一轮任务结束」这种频率完全够用；这也是它不需要任何依赖的代价。
-- **必须在有 DSH 事件的前提下工作**：headless / sdk 这类最小 profile 如果不发这些事件，插件会挂载但不产生通知。
+- **必须在有 DSH 事件的前提下工作**：headless / sdk 这类最小 profile 如果不发这些事件，插件会挂载但不产生通知。headless 收尾时会话可能已经 detach，这种情况下插件仍按「完成」通知（`idle` 只会在状态变化时发布，所以它本身就意味着有东西跑完过）。
+- **点击通知只能打开 GUI 首页**：DSH 的 Web GUI 把会话选择放在内存里，没有会话级路由，所以没有可深链的地址。`launchUrl` 里写 `{sessionId}` 会被替换，但目标页面目前不消费它。
 - 通知不做「用户是否正在看这个会话」的判断 —— 前台会话结束同样会弹。
 
 ## 开发
 
 ```powershell
-node --test test        # 22 项测试，覆盖消息文案、配置归一化、事件接线
+node --test test        # 29 项测试，覆盖消息文案、配置归一化、事件接线、双通道去重
 ```
 
 仓库结构：
 
 ```
-src/index.js       插件本体：监听四个 host 事件，决定要不要通知
+src/plugin.js      插件本体：观察派发流 + 直接监听，决定要不要通知
 src/messages.js    纯函数：会话过滤、文案、时长格式化
 src/config.js      配置归一化（任何脏值都回退到默认值，不炸 profile）
 src/notify.js      Windows Toast 传输层：队列 + powershell 进程生命周期
@@ -165,10 +199,16 @@ scripts/send-test-toast.mjs  手动验证通道
 
 `dsh-windows-notifier` is a zero-dependency, zero-build DSH host plugin that raises a native
 Windows toast whenever **any** conversation in the process hands control back to you: a turn
-finished, the agent asked a question, an approval is pending, or a step errored. It listens on
-the host root context, so background sessions notify too, while subagent/workflow child sessions
-are filtered out by default. Toasts go through Windows PowerShell's built-in WinRT
-`Windows.UI.Notifications` types, so nothing has to be installed.
+finished, the agent asked a question, an approval is pending, or a step errored. Subagent and
+workflow child sessions are filtered out by default.
+
+DSH dispatches those events through a *scope carrier*, and Cordis drops listeners whose context
+is outside the carrier's scope chain — a plain root-context listener sees `agent/status` but never
+`user-questions/request`. The plugin therefore observes two channels: `internal/dispatch`, the
+framework's own pre-filter dispatch announcement (which reaches every scope), plus direct
+listeners as a fallback. Both carry the same payload object, so a `WeakSet` de-duplicates them by
+identity. Toasts go through Windows PowerShell's built-in WinRT `Windows.UI.Notifications` types,
+so nothing has to be installed, and a click opens the Web GUI.
 
 Add the package to a profile and insert one row into the profile's `cordis.patch.yml` (or the
 machine-wide `$DSH_HOME/cordis.patch.yml` to cover every profile):

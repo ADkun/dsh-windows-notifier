@@ -51,6 +51,11 @@ export const DEFAULT_CONFIG = Object.freeze({
   powershellPath: '',
   /** Explicit `toast.ps1` path; empty uses the copy shipped in this package. */
   scriptPath: '',
+  /**
+   * URL a click on the toast opens. Empty asks the running Web GUI for its own
+   * loopback address; `{sessionId}` is substituted when present.
+   */
+  launchUrl: '',
   /** Append a debug log to this file; empty disables file logging. */
   logFile: '',
   /** How many `powershell.exe` processes may run at once. */
@@ -115,6 +120,7 @@ export function normalizeConfig(raw) {
     appId: readText(input.appId) ?? DEFAULT_CONFIG.appId,
     powershellPath: readText(input.powershellPath) ?? DEFAULT_CONFIG.powershellPath,
     scriptPath: readText(input.scriptPath) ?? DEFAULT_CONFIG.scriptPath,
+    launchUrl: readText(input.launchUrl) ?? DEFAULT_CONFIG.launchUrl,
     logFile: readText(input.logFile) ?? DEFAULT_CONFIG.logFile,
     maxConcurrent: clamp(Math.round(readNumber(input.maxConcurrent, DEFAULT_CONFIG.maxConcurrent)), 1, 8),
     timeoutMs: clamp(Math.round(readNumber(input.timeoutMs, DEFAULT_CONFIG.timeoutMs)), 1000, 120_000),

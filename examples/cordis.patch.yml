@@ -22,4 +22,5 @@
         # minTaskDurationMs: 0           # e.g. 5000 to skip short turns
         # sound: default                 # default | silent
         # duration: short                # short | long
+        # launchUrl: 'http://127.0.0.1:3080'   # default: the running Web GUI's own address
         # logFile: 'D:\dsh-windows-notifier.log'

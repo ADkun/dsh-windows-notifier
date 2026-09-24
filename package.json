@@ -12,9 +12,9 @@
     "notification"
   ],
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/plugin.js",
   "exports": {
-    ".": "./src/index.js",
+    ".": "./src/plugin.js",
     "./messages": "./src/messages.js",
     "./config": "./src/config.js",
     "./package.json": "./package.json"
