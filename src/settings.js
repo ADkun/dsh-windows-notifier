@@ -96,7 +96,7 @@ export function buildSettingsSchema(Schema) {
     notifyOnError: Schema.boolean().default(DEFAULT_CONFIG.notifyOnError).description('出错时通知'),
     notifyOnInterrupted: Schema.boolean().default(DEFAULT_CONFIG.notifyOnInterrupted).description('对话被中断时通知'),
     notifyOnActivate: Schema.boolean().default(DEFAULT_CONFIG.notifyOnActivate).description('插件启用时先发一条通知'),
-    includeSubagents: Schema.boolean().default(DEFAULT_CONFIG.includeSubagents).description('子智能体与工作流会话也通知'),
+    includeSubagents: Schema.boolean().default(DEFAULT_CONFIG.includeSubagents).description('子智能体自己的「结束」也通知（提问/审批/出错始终通知）'),
     disappearAfterMs: Schema.number().default(DEFAULT_CONFIG.disappearAfterMs).description('通知停留时长（毫秒）；0 = 一直留到手动关闭'),
     openOnClick: Schema.boolean().default(DEFAULT_CONFIG.openOnClick).description('点击通知时打开 DSH Web 界面'),
     launchUrl: Schema.string().default(DEFAULT_CONFIG.launchUrl).description('点击通知打开的地址；留空 = 当前 Web 界面，可用 {sessionId}'),

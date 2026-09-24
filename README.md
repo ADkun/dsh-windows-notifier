@@ -16,7 +16,7 @@
 
 通知正文第一行是**对话标题**（取自 DSH 的会话标题，还没生成标题时回退到工作目录名），第二行是状态说明或具体内容（提问内容、工具名、错误信息、运行时长）。
 
-默认**不通知** subagent / workflow 产生的内部子会话 —— 一次后台委派会派生好几个子会话，全部通知会变成弹窗轰炸。需要的话把 `includeSubagents` 打开。
+默认**不通知** subagent / workflow 子会话自己一轮跑完的那声「对话已完成」—— 一次后台委派会派生好几个子会话，全部通知会变成弹窗轰炸。**但子会话需要人**的时候照常通知：它向你提问、等你批准、或者出错，都会弹。需要连子会话的「结束」也听，把 `includeSubagents` 打开。
 
 ## 工作原理
 
@@ -42,6 +42,14 @@ DSH 的作用域事件（`agent/status`、`user-questions/request`、`approval/r
 2. **直接监听那四个事件** —— 兜底：万一某个版本不再公布派发流，直接监听仍然生效。
 
 两条通道拿到的是**同一个载荷对象**，因此用一个 `WeakSet` 按对象身份去重：谁先到谁负责通知，另一条通道直接跳过 —— 不需要拍脑袋定一个时间窗。
+
+### 怎么认出一个子会话
+
+DSH 在每个子会话的 durable header 上盖了 `origin: 'subagent'`（连同 `parentSession`、`delegationDepth`），这是**唯一权威**的判据；`includeSubagents` 关着时，只有「一轮结束」这一族（`completed` / `interrupted`）会被它挡下，提问 / 审批 / 出错照旧通知。
+
+判断本身走的是**事件载荷自带的那份会话**：载荷里有 live agent，live agent 上有它自己的 `session`，所以答案跟着事件一起来，不依赖任何服务查询。这一条是要紧的 —— 插件行是补丁层插进来的，可能在发布 `sessions` / `sessionTitle` 的那一行之前就激活，而 `ctx.get()` 在 apply 时取到的 `undefined` 会跟着进程一辈子；只查 `ctx.sessions` 的过滤会**永远不生效**，每个子会话跑完都弹一条「对话已完成」。那两个服务现在也用 `ctx.inject` 采用（和 `settings` 一样），所以会话标题也能正常读到。
+
+另外还会从 `session/created` 的公告里**记下**子会话 id（有上限），作为「连载荷里的 session 都读不到」时的兜底。反过来，读不到会话一律**按用户会话处理**：宁可多弹一条，也不能把主对话吞掉。
 
 其余特性：
 
@@ -123,7 +131,7 @@ New-Item -ItemType Junction `
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | 总开关；`false` 时插件不做任何事 |
 | `notifyOnActivate` | boolean | `false` | 激活时先弹一条「已启用」，用来确认通道正常 |
-| `includeSubagents` | boolean | `false` | 是否也通知 subagent / workflow 子会话 |
+| `includeSubagents` | boolean | `false` | 是否也通知 subagent / workflow 子会话**自己一轮结束**；子会话的提问 / 审批 / 出错始终通知 |
 | `notifyOnComplete` | boolean | `true` | 任务完成（`idle`）时通知 |
 | `notifyOnQuestion` | boolean | `true` | 智能体提问时通知 |
 | `notifyOnApproval` | boolean | `true` | 等待批准时通知 |
@@ -169,7 +177,7 @@ node scripts/send-test-toast.mjs "自定义标题" "自定义正文"
 
 ```
 notify complete: ✅ 对话已完成 / 重构支付模块 | 已运行 2 分 13 秒，可以继续对话了。 -> http://127.0.0.1:3080
-skip complete for session-…: not a user-visible conversation
+skip complete for cccc1111-child-0001: subagent turn end (includeSubagents is off)
 skip complete for session-…: attached session has no settled turn
 session … is not attached; reporting completion without a turn outcome
 skip question: switch off
@@ -198,15 +206,16 @@ skip question: switch off
 ## 开发
 
 ```powershell
-node --test test        # 55 项测试：消息文案、配置归一化、事件接线、双通道去重、
-                        # settings 命名空间与实时改配置、浏览器半侧的卡片契约与暂存/保存
+node --test test        # 60 项测试：消息文案、配置归一化、事件接线、双通道去重、
+                        # 子会话识别（载荷自带 session / 创建公告兜底）、settings 命名空间与实时改配置、
+                        # 浏览器半侧的卡片契约与暂存/保存
 ```
 
 仓库结构：
 
 ```
 src/plugin.js      插件本体：观察派发流 + 直接监听，决定要不要通知，并跟随界面设置
-src/messages.js    纯函数：会话过滤、文案、时长格式化
+src/messages.js    纯函数：会话分类、文案、时长格式化
 src/config.js      配置归一化（任何脏值都回退到默认值，不炸 profile）
 src/settings.js    settings 命名空间：卡片能改哪些选项、默认值、组合层 base
 src/client.js      浏览器半侧：手写的 lazy-CJS bundle，注册「插件配置」里的卡片
@@ -219,10 +228,16 @@ scripts/send-test-toast.mjs  手动验证通道
 
 `dsh-windows-notifier` is a zero-build DSH plugin that raises a native Windows toast whenever
 **any** conversation in the process hands control back to you: a turn finished, the agent asked a
-question, an approval is pending, or a step errored. Subagent and workflow child sessions are
-filtered out by default. It depends on nothing you have to install: the Windows side is Windows
+question, an approval is pending, or a step errored. A subagent or workflow child's *own* turn end
+is filtered out by default (set `includeSubagents: true` to hear it too); a child that asks a
+question, blocks on approval, or errors is still reported, because the user is the one who has to
+answer it. It depends on nothing you have to install: the Windows side is Windows
 PowerShell's built-in WinRT `Windows.UI.Notifications`, and the settings schema comes from the
 harness's own `@deepseek-ai/schemastery`.
+
+A child is recognised from `origin: 'subagent'` in the session header DSH stamps on it — read from
+the session the *event payload itself* carries (`payload.agent.session`), never from a service
+lookup that a patch-inserted row may have sampled before that service existed.
 
 Its common switches are editable at **Settings → Plugins → Plugin configuration**, which writes to
 `$DSH_HOME/settings.yaml` and applies live — including the notification lifetime (`0` means "stay

@@ -9,7 +9,8 @@ import {
   KIND_QUESTION,
   buildNotification,
   formatDuration,
-  isUserVisibleSession,
+  isSubagentHeader,
+  isTurnEndKind,
   sessionLabel,
   truncate,
 } from '../src/messages.js'
@@ -26,12 +27,24 @@ test('sessionLabel shortens a session identity', () => {
   assert.equal(sessionLabel(undefined), '')
 })
 
-test('isUserVisibleSession excludes subagent and child sessions', () => {
-  assert.equal(isUserVisibleSession({}), true)
-  assert.equal(isUserVisibleSession(undefined), true)
-  assert.equal(isUserVisibleSession({ origin: 'subagent' }), false)
-  assert.equal(isUserVisibleSession({ parentSession: 'session-parent' }), false)
-  assert.equal(isUserVisibleSession({ parentSession: null }), true)
+test('isSubagentHeader recognises a delegated child and never guesses', () => {
+  assert.equal(isSubagentHeader({}), false)
+  assert.equal(isSubagentHeader(undefined), false)
+  assert.equal(isSubagentHeader(null), false)
+  assert.equal(isSubagentHeader('session-x'), false)
+  assert.equal(isSubagentHeader({ origin: 'subagent' }), true)
+  assert.equal(isSubagentHeader({ delegationDepth: 1 }), true)
+  assert.equal(isSubagentHeader({ delegationDepth: 0 }), false)
+  assert.equal(isSubagentHeader({ parentSession: 'session-parent' }), true)
+  assert.equal(isSubagentHeader({ parentSession: null }), false)
+})
+
+test('isTurnEndKind covers exactly the turn-end reports', () => {
+  assert.equal(isTurnEndKind(KIND_COMPLETE), true)
+  assert.equal(isTurnEndKind(KIND_INTERRUPTED), true)
+  assert.equal(isTurnEndKind(KIND_QUESTION), false)
+  assert.equal(isTurnEndKind(KIND_APPROVAL), false)
+  assert.equal(isTurnEndKind(KIND_ERROR), false)
 })
 
 test('formatDuration reads like a notification', () => {

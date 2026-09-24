@@ -11,6 +11,22 @@
  * | `approval/request` | an operation is blocked on the user's approval |
  * | `agent/error` | a step or turn errored |
  *
+ * ## Delegated children
+ *
+ * A subagent or workflow child is a real session that hands control back to its
+ * parent, not to the user, so its *turn end* is reported only when
+ * `includeSubagents` is on. Everything else a child does that needs a human —
+ * asking a question, blocking on approval, erroring — is still reported,
+ * because the user is the one who has to answer it.
+ *
+ * Telling a child apart must not depend on a service lookup that can come back
+ * empty: the event payload already carries the live `agent`, and the live
+ * `agent` carries its own `session` with the durable header DSH classification
+ * lives in. That is the primary source; the session store, and an id set
+ * learned from `session/created`, are fallbacks. An event whose session cannot
+ * be read at all is treated as a user conversation — an unknown session must
+ * never lose a notification.
+ *
  * ## Why it listens on two channels
  *
  * DSH dispatches those events through a *scope carrier*, and Cordis drops any
@@ -51,7 +67,8 @@ import {
   KIND_INTERRUPTED,
   KIND_QUESTION,
   buildNotification,
-  isUserVisibleSession,
+  isSubagentHeader,
+  isTurnEndKind,
 } from './messages.js'
 import { createNotifier } from './notify.js'
 import { SCHEMA_SPECIFIER, SETTINGS_NAMESPACE, SETTINGS_SCHEMA, settingsBase } from './settings.js'
@@ -76,6 +93,14 @@ const KIND_SWITCH = Object.freeze({
 
 /** How many trailing session events to scan when looking for the last turn end. */
 const TURN_SCAN_LIMIT = 200
+
+/**
+ * How many child session ids to remember when a live session cannot be read off
+ * the event payload. Bounded so an arbitrarily long-lived process cannot grow
+ * this set without limit; the payload's own session is the primary source, so
+ * eviction only ever forgets a fallback.
+ */
+const SUBAGENT_MEMORY_LIMIT = 2048
 
 /**
  * Map one durable `turn/end` reason onto a notification kind.
@@ -165,12 +190,30 @@ export function apply(ctx, rawConfig) {
     return
   }
 
-  const sessions = ctx.get('sessions')
-  const sessionTitle = ctx.get('sessionTitle')
+  // Both lookups are optional context, and both are adopted through
+  // `ctx.inject` rather than sampled once with `ctx.get`: a row inserted by a
+  // patch layer (this one) can activate before the row that publishes the
+  // service, and a value captured at apply time would then stay `undefined` for
+  // the rest of the process — which is exactly how a live conversation ends up
+  // labelled "会话 a1b2c3d4" instead of by its title.
+  let sessions = ctx.get('sessions')
+  let sessionTitle = ctx.get('sessionTitle')
+  for (const [serviceName, adopt] of [
+    ['sessions', (value) => { sessions = value }],
+    ['sessionTitle', (value) => { sessionTitle = value }],
+  ]) {
+    ctx.inject([serviceName], (serviceCtx) => {
+      const value = serviceCtx[serviceName]
+      if (value !== undefined) adopt(value)
+    })
+  }
   let notifier = createNotifier(config, log)
 
   /** Sessions seen running, so a finished turn can report its duration. */
   const runningSince = new Map()
+
+  /** Child sessions learned from their own creation announcement, by identity. */
+  const subagentSessions = new Set()
 
   /** Payload objects already reported, shared by both observation channels. */
   const reported = new WeakSet()
@@ -198,6 +241,75 @@ export function apply(ctx, rawConfig) {
       return sessions.get(sessionId)
     } catch {
       return undefined
+    }
+  }
+
+  /**
+   * The live session an event's own agent drives, without throwing.
+   *
+   * This is the authoritative source: the payload carries the agent and the
+   * agent carries its session, so the answer travels with the event instead of
+   * depending on a service this row may have resolved before it existed.
+   *
+   * @param {unknown} agent - the payload's agent subject.
+   * @returns {object | undefined} the live session, when there is one.
+   */
+  const readAgentSession = (agent) => {
+    if (agent === null || typeof agent !== 'object') return undefined
+    let session
+    try {
+      session = agent.session
+    } catch {
+      return undefined
+    }
+    return session !== null && typeof session === 'object' ? session : undefined
+  }
+
+  /** The best session object available for one event, without throwing. */
+  const resolveSession = (agent, sessionId) => readAgentSession(agent) ?? lookupSession(sessionId)
+
+  /**
+   * Whether one event belongs to a delegated child conversation.
+   *
+   * Unknown is deliberately NOT a child: an event whose session cannot be read
+   * keeps its notification, because losing a real conversation is worse than
+   * one extra toast.
+   *
+   * @param {unknown} agent - the payload's agent subject.
+   * @param {unknown} sessionId - the agent identity the payload carries.
+   * @param {object | undefined} session - the session already resolved for it.
+   * @returns {boolean} whether this event belongs to a subagent run.
+   */
+  const isSubagentEvent = (agent, sessionId, session) => {
+    const header = (session ?? readAgentSession(agent))?.header
+    if (header !== undefined && header !== null) return isSubagentHeader(header)
+    const stored = lookupSession(sessionId)
+    if (stored !== undefined) return isSubagentHeader(stored.header)
+    return sessionId !== undefined && sessionId !== null && subagentSessions.has(String(sessionId))
+  }
+
+  /**
+   * Learn one child identity from its own `session/created` announcement.
+   *
+   * The fallback for an event whose payload never exposes a readable session:
+   * classification recorded at creation time outlives the live session.
+   *
+   * @param {unknown} session - the announced session.
+   */
+  const rememberSession = (session) => {
+    try {
+      const header = session?.header
+      if (header === undefined || header === null) return
+      if (!isSubagentHeader(header)) return
+      const id = header.id ?? session?.id
+      if (id === undefined || id === null) return
+      subagentSessions.add(String(id))
+      while (subagentSessions.size > SUBAGENT_MEMORY_LIMIT) {
+        const oldest = subagentSessions.values().next().value
+        subagentSessions.delete(oldest)
+      }
+    } catch (error) {
+      log(`session/created handler failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -251,18 +363,21 @@ export function apply(ctx, rawConfig) {
    * how it answers.
    *
    * @param {string} kind - one of the `KIND_*` values.
-   * @param {unknown} sessionId - the conversation the event belongs to.
+   * @param {unknown} agent - the payload's agent subject, carrying its session.
    * @param {string} [detail] - the question, tool name, or error text.
    * @param {number} [durationMs] - how long the finished turn ran.
    */
-  const notify = (kind, sessionId, detail, durationMs) => {
+  const notify = (kind, agent, detail, durationMs) => {
     if (config[KIND_SWITCH[kind]] !== true) {
       log(`skip ${kind}: switch off`)
       return
     }
-    const session = lookupSession(sessionId)
-    if (!config.includeSubagents && !isUserVisibleSession(session?.header)) {
-      log(`skip ${kind} for ${String(sessionId)}: not a user-visible conversation`)
+    const sessionId = agent?.id
+    const session = resolveSession(agent, sessionId)
+    // Only a child's own turn end is the parent's business. A child that needs
+    // the user — a question, an approval, an error — is still reported.
+    if (!config.includeSubagents && isTurnEndKind(kind) && isSubagentEvent(agent, sessionId, session)) {
+      log(`skip ${kind} for ${String(sessionId)}: subagent turn end (includeSubagents is off)`)
       return
     }
     const message = buildNotification(kind, {
@@ -278,7 +393,8 @@ export function apply(ctx, rawConfig) {
 
   /** Report one settled turn, once the log confirms what settled it. */
   const reportStatus = (payload) => {
-    const sessionId = payload?.agent?.id
+    const agent = payload?.agent
+    const sessionId = agent?.id
     if (sessionId === undefined || sessionId === null) return
     try {
       if (payload.status === 'running') {
@@ -289,7 +405,7 @@ export function apply(ctx, rawConfig) {
       const startedAt = runningSince.get(sessionId)
       runningSince.delete(sessionId)
 
-      const session = lookupSession(sessionId)
+      const session = resolveSession(agent, sessionId)
       const outcome = readLastTurnOutcome(session)
       // `idle` is only published on a change, so it always means a running
       // agent stopped — the turn outcome refines the wording, it is not the
@@ -319,7 +435,7 @@ export function apply(ctx, rawConfig) {
       }
       notify(
         interrupted ? KIND_INTERRUPTED : KIND_COMPLETE,
-        sessionId,
+        agent,
         undefined,
         interrupted || startedAt === undefined ? undefined : Date.now() - startedAt,
       )
@@ -335,7 +451,7 @@ export function apply(ctx, rawConfig) {
       const detail = failure instanceof Error
         ? failure.message
         : typeof failure === 'string' ? failure : ''
-      notify(KIND_ERROR, payload?.agent?.id, detail)
+      notify(KIND_ERROR, payload?.agent, detail)
     } catch (error) {
       log(`agent/error handler failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -347,7 +463,7 @@ export function apply(ctx, rawConfig) {
       const questions = request?.questions
       const first = Array.isArray(questions) ? questions[0] : undefined
       const question = typeof first?.question === 'string' ? first.question : ''
-      notify(KIND_QUESTION, request?.agent?.id, question)
+      notify(KIND_QUESTION, request?.agent, question)
     } catch (error) {
       log(`user-questions/request handler failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -358,7 +474,7 @@ export function apply(ctx, rawConfig) {
     try {
       const toolName = typeof request?.toolName === 'string' ? request.toolName : '未知工具'
       const reason = typeof request?.reason === 'string' ? request.reason.trim() : ''
-      notify(KIND_APPROVAL, request?.agent?.id, reason === '' ? `工具 ${toolName} 等待你确认。` : `工具 ${toolName}：${reason}`)
+      notify(KIND_APPROVAL, request?.agent, reason === '' ? `工具 ${toolName} 等待你确认。` : `工具 ${toolName}：${reason}`)
     } catch (error) {
       log(`approval/request handler failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -381,6 +497,7 @@ export function apply(ctx, rawConfig) {
     'user-questions/request': { report: reportQuestion, chain: true },
     'approval/request': { report: reportApproval, chain: true },
     'agent/disposed': { report: forgetAgent, chain: false },
+    'session/created': { report: rememberSession, chain: false },
   })
 
   /**

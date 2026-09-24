@@ -34,6 +34,17 @@ function fakeSession({ id, origin, events }) {
   }
 }
 
+/**
+ * One agent-scoped event payload, as the framework dispatches it: the payload
+ * carries the live agent, and the live agent carries its session.
+ *
+ * @param session - the live session, or `undefined` for an agent whose session
+ *   is only reachable through the session store.
+ */
+function agentPayload(session, extra) {
+  return { agent: { id: session?.header.id, session }, ...extra }
+}
+
 /** A Cordis-context stand-in recording listeners, effects, and services. */
 function createFakeContext(services) {
   const listeners = new Map()
@@ -163,22 +174,75 @@ test('an errored turn does not also report completion', windowsOnly, (t) => {
   assert.doesNotMatch(log(), /notify complete/)
 })
 
-test('subagent sessions stay silent by default and speak when asked', windowsOnly, (t) => {
-  const session = fakeSession({
-    id: 'session-dddd1111-2222',
+/** A child session that settled one turn, and the events that say so. */
+function childSession(id) {
+  return fakeSession({
+    id,
     origin: 'subagent',
     events: [
       { type: 'turn/start', data: { turn: 1 } },
       { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
     ],
   })
+}
+
+test('subagent sessions stay silent by default and speak when asked', windowsOnly, (t) => {
+  const session = childSession('session-dddd1111-2222')
+
   const silent = mount(t, { session })
   fire(silent.ctx, ...idle(session.header.id))
+  assert.match(silent.log(), /skip complete for session-dddd1111-2222: subagent turn end/)
   assert.doesNotMatch(silent.log(), /notify complete/)
 
   const loud = mount(t, { session }, { includeSubagents: true })
   fire(loud.ctx, ...idle(session.header.id))
   assert.match(loud.log(), /notify complete/)
+})
+
+test('a child is recognised from the session its own payload carries', windowsOnly, (t) => {
+  // The reported failure: in a real host the session store lookup can come back
+  // empty for every id, so a filter that depends on it silently never fires and
+  // each child's turn end raises a "对话已完成" toast. The payload's agent
+  // carries its session, so classification must not need the store at all.
+  const child = childSession('cccc1111-child-0001')
+  const { ctx, log } = mount(t, {})
+
+  fire(ctx, 'agent/status', agentPayload(child, { status: 'idle' }))
+
+  assert.match(log(), /skip complete for cccc1111-child-0001: subagent turn end/)
+  assert.doesNotMatch(log(), /notify complete/)
+})
+
+test('a child recognised at creation stays silent when its session cannot be read', windowsOnly, (t) => {
+  const child = childSession('cccc1111-child-0002')
+  const { ctx, log } = mount(t, {})
+
+  fire(ctx, 'session/created', child)
+  // The idle payload carries only an id — no session anywhere.
+  fire(ctx, ...idle(child.header.id))
+
+  assert.match(log(), /skip complete for cccc1111-child-0002: subagent turn end/)
+  assert.doesNotMatch(log(), /notify complete/)
+})
+
+test('a child that needs the user still notifies', windowsOnly, (t) => {
+  const child = fakeSession({ id: 'cccc1111-child-0003', origin: 'subagent', events: [] })
+  const { ctx, log } = mount(t, {})
+
+  const question = fire(
+    ctx,
+    'user-questions/request',
+    agentPayload(child, { questions: [{ question: '要用哪种模板？' }] }),
+    () => 'downstream',
+  )
+  assert.deepEqual(question, ['downstream'])
+  assert.match(log(), /notify question: ❓ 需要你的输入 \/ 重构支付模块 \| 要用哪种模板？/)
+
+  fire(ctx, 'approval/request', agentPayload(child, { toolName: 'pwsh', reason: '需要确认' }), () => 'downstream')
+  assert.match(log(), /notify approval: 🔐 需要你批准 \/ 重构支付模块 \| 工具 pwsh：需要确认/)
+
+  fire(ctx, 'agent/error', agentPayload(child, { error: new Error('子代理挂了') }))
+  assert.match(log(), /notify error: ❌ 对话出错 \/ 重构支付模块 \| 子代理挂了/)
 })
 
 test('an interrupted turn follows its own switch', windowsOnly, (t) => {
@@ -266,6 +330,7 @@ test('every listener is global, so scope routing can never drop it', windowsOnly
     'user-questions/request',
     'approval/request',
     'agent/disposed',
+    'session/created',
   ]
   assert.deepEqual([...ctx.listeners.keys()].sort(), [...observed].sort())
   for (const event of observed) {

@@ -39,21 +39,47 @@ export function sessionLabel(sessionId) {
 }
 
 /**
- * Decide whether a conversation is one the user actually sees.
+ * Decide whether a session header belongs to a delegated child conversation.
  *
  * Subagent runs and workflow child agents are real sessions, but they are not
- * conversations in the sidebar, and notifying for each of them turns one
- * background task into a burst of toasts.
+ * conversations in the sidebar, and reporting each of their turn ends turns one
+ * background task into a burst of "the conversation finished" toasts.
  *
- * @param {{ origin?: string, parentSession?: unknown } | undefined | null} header
- *   the session header, or `undefined` when the session is not attached.
- * @returns {boolean} whether a toast for this session is worth showing.
+ * `origin === 'subagent'` is authoritative: DSH's subagent seam stamps it on
+ * every child it creates, alongside the parent lineage and the delegation
+ * depth. The two lineage fields are kept as a fallback for a child produced by
+ * a runtime that predates the classification.
+ *
+ * An ABSENT header is not evidence either way — it only means no session could
+ * be read for this event. Callers must treat that as "not known to be a child"
+ * rather than as a verdict, so an unreadable session can never silently lose a
+ * user-visible notification.
+ *
+ * @param {{ origin?: string, parentSession?: unknown, delegationDepth?: unknown } | undefined | null} header
+ *   the session header, or `undefined` when no session could be read.
+ * @returns {boolean} whether this header describes a delegated child run.
  */
-export function isUserVisibleSession(header) {
-  if (header === undefined || header === null) return true
-  if (header.origin === 'subagent') return false
-  if (header.parentSession !== undefined && header.parentSession !== null) return false
-  return true
+export function isSubagentHeader(header) {
+  if (header === undefined || header === null || typeof header !== 'object') return false
+  if (header.origin === 'subagent') return true
+  if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return true
+  return header.parentSession !== undefined && header.parentSession !== null
+}
+
+/**
+ * Whether one notification kind reports a conversation handing control back
+ * after a turn (`agent/status` → `idle`).
+ *
+ * This is the only family that is suppressed for delegated children: a child
+ * finishing its own turn is the parent's business, not the user's. A child that
+ * asks a question, blocks on approval, or errors still needs the user, so those
+ * kinds are reported for every conversation.
+ *
+ * @param {string} kind - one of the exported `KIND_*` values.
+ * @returns {boolean} whether this kind is a turn-end report.
+ */
+export function isTurnEndKind(kind) {
+  return kind === KIND_COMPLETE || kind === KIND_INTERRUPTED
 }
 
 /**

@@ -27,7 +27,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
   /** Send one "plugin is active" toast as soon as the row activates. */
   notifyOnActivate: false,
-  /** Notify for subagent / workflow child sessions as well. */
+  /**
+   * Also report a subagent / workflow child's own turn end.
+   *
+   * Child sessions that *need the user* — a question, an approval, an error —
+   * are always reported; this switch only covers the "the child finished its
+   * turn" family, whose audience is the parent agent rather than the user.
+   */
   includeSubagents: false,
   /** A turn ended normally: the conversation is waiting for your next message. */
   notifyOnComplete: true,

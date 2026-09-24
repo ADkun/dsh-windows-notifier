@@ -92,7 +92,12 @@ window.__ModuleLoader__.load({
       { name: 'notifyOnError', kind: 'switch', label: '出错时通知' },
       { name: 'notifyOnInterrupted', kind: 'switch', label: '对话被中断时通知' },
       { name: 'notifyOnActivate', kind: 'switch', label: '插件启用时先发一条通知', hint: '用来确认通知通道本身是通的。' },
-      { name: 'includeSubagents', kind: 'switch', label: '子智能体与工作流会话也通知' },
+      {
+        name: 'includeSubagents',
+        kind: 'switch',
+        label: '子智能体自己的「结束」也通知',
+        hint: '子智能体向你提问、等你批准、或出错时始终会通知；这里只管子智能体自己一轮跑完的那声「对话已完成」。',
+      },
       {
         name: 'disappearAfterMs',
         kind: 'number',
