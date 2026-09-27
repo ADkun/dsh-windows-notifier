@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply } from '../src/plugin.js'
+import plugin, { apply, name } from '../src/plugin.js'
+import { Config } from '../src/settings.js'
 
 /** The plugin short-circuits off Windows, so the wiring tests are Windows-only. */
 const windowsOnly = { skip: process.platform !== 'win32' ? 'Windows-only plugin' : false }
@@ -52,6 +53,8 @@ function createFakeContext(services) {
   return {
     listeners,
     effects,
+    /** The row fiber a settings policy would be registered against. */
+    fiber: { id: 'row-fiber' },
     on(event, handler, options) {
       const bucket = listeners.get(event) ?? []
       bucket.push({ handler, options })
@@ -62,9 +65,10 @@ function createFakeContext(services) {
       return services[serviceName]
     },
     /**
-     * Cordis opens the callback once every named service exists. Nothing in
-     * this file provides one, so the settings branch simply never opens — the
-     * event wiring under test must not depend on it.
+     * Cordis opens the callback once every named service exists and hands it a
+     * child context carrying those services. Nothing in this file provides one,
+     * so the settings branch simply never opens — the event wiring under test
+     * must not depend on it.
      */
     inject(dependencies, callback) {
       if (!dependencies.every((dependency) => services[dependency] !== undefined)) return () => {}
@@ -118,6 +122,17 @@ function mount(t, { session, title = '重构支付模块' }, config = {}, extraS
 
 const running = (id) => ['agent/status', { agent: { id }, status: 'running' }]
 const idle = (id) => ['agent/status', { agent: { id }, status: 'idle' }]
+
+test('the harness contract is the default export, Config included', () => {
+  // The Loader reads the plugin object from the default export, so `Config` has
+  // to be a property of it — a named export alone would lose the schema, and
+  // with it the row's configuration form.
+  assert.deepEqual(Object.keys(plugin).sort(), ['Config', 'apply', 'name'])
+  assert.equal(plugin.name, name)
+  assert.equal(plugin.name, 'dsh-windows-notifier')
+  assert.equal(plugin.apply, apply)
+  assert.equal(plugin.Config, Config)
+})
 
 test('a finished turn notifies once, with the title and the elapsed time', windowsOnly, (t) => {
   const session = fakeSession({

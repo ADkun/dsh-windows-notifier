@@ -1,6 +1,6 @@
 {
   "name": "dsh-windows-notifier",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH plugin: send a native Windows toast notification whenever any DSH conversation needs you — a task finished, a question was asked, or an approval is waiting.",
   "keywords": [
     "dsh",
@@ -23,8 +23,16 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "peerDependencies": {
@@ -39,6 +47,7 @@
     "src",
     "scripts",
     "examples",
+    "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],

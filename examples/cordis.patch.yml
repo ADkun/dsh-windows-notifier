@@ -1,31 +1,59 @@
-# Ready-to-paste patch entry for dsh-windows-notifier.
+# Profile-level overrides for dsh-windows-notifier.
 #
-# Put this in ONE of:
-#   $DSH_HOME/profiles/<profile>/cordis.patch.yml   -> that profile only
-#   $DSH_HOME/cordis.patch.yml                      -> every profile on this machine
+# The row itself now comes from this package's own bundle patch
+# (`cordis.patch.yml`), which a profile selects through `dsh.profile.bundles`:
 #
-# A profile with `patchReload: live` picks the change up without a restart.
-# Every key under `config:` is optional; the commented values are the defaults.
+#   dsh plugin --profile <profile> add file:<tgz>     # installs and selects it
+#
+# Everything below is therefore an *override* of that row, and belongs beside
+# the profile that selected the bundle —
+# `$DSH_HOME/profiles/<profile>/cordis.patch.yml`, the same file the
+# configuration form writes to. A profile with `patchReload: live` picks the
+# change up without a restart; a `config:` edit applies live, but replacing
+# `src/` code still needs a restart.
+#
+# A later layer replaces the whole `config` object of the row, so list every
+# value you want here instead of relying on one an earlier layer set. Values set
+# here show up in the configuration form as 「已覆盖默认」 (Overridden) and come
+# back by way of the form's per-field reset.
 
-- insert:
-    - id: windows-notifier
-      name: 'dsh-windows-notifier'
-      config:
-        # enabled: true
-        # notifyOnActivate: false        # set true once to prove the channel works
-        # includeSubagents: false        # notify for subagent/workflow child sessions too
-        # notifyOnComplete: true
-        # notifyOnQuestion: true
-        # notifyOnApproval: true
-        # notifyOnError: true
-        # notifyOnInterrupted: false
-        # minTaskDurationMs: 0           # e.g. 5000 to skip short turns
-        # sound: default                 # default | silent
-        # disappearAfterMs: 6000         # 0 = stay on screen until dismissed (scenario="reminder")
-        # openOnClick: true              # false makes the toast inert
-        # launchUrl: 'http://127.0.0.1:3080'   # default: the running Web GUI's own address
-        # logFile: 'D:\dsh-windows-notifier.log'
-        #
-        # These keys (and the ones above) are also editable at runtime under
-        # Settings -> Plugins -> Plugin configuration; a value saved there lives
-        # in $DSH_HOME/settings.yaml and wins over this config block.
+- id: windows-notifier
+  name: 'dsh-windows-notifier'
+  config:
+    # Ordinary (composition-only) fields: the form cannot edit these, because a
+    # change to them is only applied when the plugin is mounted again.
+    #
+    # logFile: 'D:\dsh\dsh-windows-notifier\.dsh-windows-notifier.log'
+    # appId: '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+    # powershellPath: ''
+    # scriptPath: ''
+    # maxConcurrent: 1
+    # timeoutMs: 15000
+    #
+    # Live fields: everything below is also editable in
+    # Plugins -> dsh-windows-notifier -> windows-notifier, and a value saved
+    # there wins, because the form writes this very row.
+    #
+    # enabled: true
+    # notifyOnActivate: false        # set true once to prove the channel works
+    # includeSubagents: false        # notify for subagent/workflow child sessions too
+    # notifyOnComplete: true
+    # notifyOnQuestion: true
+    # notifyOnApproval: true
+    # notifyOnError: true
+    # notifyOnInterrupted: false
+    # minTaskDurationMs: 0           # e.g. 5000 to skip short turns
+    # sound: default                 # default | silent
+    # disappearAfterMs: 6000         # 0 = stay on screen until dismissed (scenario="reminder")
+    # openOnClick: true              # false makes the toast inert
+    # launchUrl: ''                  # default: the running Web GUI's own address
+
+# To switch the row off without uninstalling the bundle, override it with
+# `disabled: true` (or use the switch the Plugins page renders for it). Keep a
+# row's values either here or in the form, never in `$DSH_HOME/cordis.patch.yml`
+# as well: a home patch replaces the whole `config` object, and a form write it
+# would shadow is refused outright.
+#
+# - id: windows-notifier
+#   name: 'dsh-windows-notifier'
+#   disabled: true

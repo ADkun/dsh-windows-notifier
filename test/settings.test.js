@@ -1,49 +1,69 @@
 /**
- * The settings namespace: what it declares, and how the plugin follows it.
+ * The live configuration schema, and how the plugin follows it.
  *
- * Two halves are covered here. The first is pure — the namespace name, the
- * schema, and the composition `base` a card inherits from. The second runs the
- * plugin body over a stand-in settings service to prove the part users actually
- * feel: a value saved in the GUI changes behaviour without a reload, and
- * `enabled` really does take the listeners off.
+ * DSH 0.1.7 removed the plugin-registered settings namespace: a row's form is
+ * now derived from its own `Config`, whose `.volatile()` fields arrive as
+ * references the Harness rewrites in place when a saved value is applied. Two
+ * halves are covered here. The first is pure — the option lists, the schema they
+ * build, and how a resolved config is read back. The second runs the plugin body
+ * over a Cordis stand-in to prove the part users actually feel: a value saved in
+ * the Plugins page changes behaviour without a reload, and `enabled` gates every
+ * report while the listeners stay attached for the row's whole life.
  */
 
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
-import { DEFAULT_CONFIG, normalizeConfig } from '../src/config.js'
+import { DEFAULT_CONFIG } from '../src/config.js'
 import { apply } from '../src/plugin.js'
 import {
-  SETTINGS_NAMESPACE,
-  SETTINGS_OPTIONS,
-  SETTINGS_SCHEMA,
-  buildSettingsSchema,
+  Config,
+  LIVE_OPTIONS,
+  ORDINARY_OPTIONS,
+  SCHEMA_SPECIFIER,
+  buildConfigSchema,
   loadSchema,
-  settingsBase,
+  readConfig,
+  readField,
 } from '../src/settings.js'
 
 /** The plugin short-circuits off Windows, so the wiring tests are Windows-only. */
 const windowsOnly = { skip: process.platform !== 'win32' ? 'Windows-only plugin' : false }
 
-/** The namespace can only be registered where the harness ships schemastery. */
+/** The schema-dependent half can only run where schemastery resolves. */
 const schemaOnly = {
-  skip: SETTINGS_SCHEMA === undefined ? 'this checkout has no @deepseek-ai/schemastery' : false,
+  skip: loadSchema() === undefined ? `this checkout has no ${SCHEMA_SPECIFIER}` : false,
 }
 
-/** A schemastery stand-in that records the shape a schema builder declared. */
+/**
+ * Both conditions at once.
+ *
+ * `node:test` takes its options as a single argument: called with two options
+ * objects, the second is dropped along with the test body.
+ */
+const windowsAndSchema = { skip: windowsOnly.skip || schemaOnly.skip }
+
+/** A schemastery stand-in that records what each builder was told. */
 function createFakeSchema() {
   const builder = (kind) => {
     const node = {
       kind,
-      value: `${kind}:`,
+      value: undefined,
+      live: false,
+      description: undefined,
       default(value) {
-        node.value = `${kind}:${String(value)}`
+        node.value = value
         return node
       },
-      description() {
+      volatile() {
+        node.live = true
+        return node
+      },
+      description(text) {
+        node.description = text
         return node
       },
     }
@@ -54,79 +74,173 @@ function createFakeSchema() {
     number: () => builder('number'),
     string: () => builder('string'),
     object(shape) {
-      const resolved = {}
-      for (const [key, node] of Object.entries(shape)) resolved[key] = node.value
-      return { dict: shape, resolved }
+      return { dict: shape }
     },
   }
 }
 
-test('the namespace name is one the settings service accepts', () => {
-  assert.match(SETTINGS_NAMESPACE, /^[a-z][a-z0-9-]*$/)
+test('the live and ordinary option lists are disjoint and name real options', () => {
+  assert.equal(LIVE_OPTIONS.length, 14)
+  assert.equal(ORDINARY_OPTIONS.length, 5)
+  const all = [...LIVE_OPTIONS, ...ORDINARY_OPTIONS]
+  assert.equal(new Set(all).size, all.length, 'no option appears twice')
+  for (const key of all) {
+    assert.ok(Object.prototype.hasOwnProperty.call(DEFAULT_CONFIG, key), `${key} is a real option`)
+  }
 })
 
-test('the schema covers exactly the options a card may override', () => {
-  const schema = buildSettingsSchema(createFakeSchema())
-  assert.deepEqual(Object.keys(schema.resolved), [...SETTINGS_OPTIONS])
-  assert.equal(schema.resolved.enabled, 'boolean:true')
-  assert.equal(schema.resolved.notifyOnActivate, 'boolean:false')
-  assert.equal(schema.resolved.disappearAfterMs, 'number:6000')
-  assert.equal(schema.resolved.openOnClick, 'boolean:true')
-  assert.equal(schema.resolved.launchUrl, 'string:')
-  assert.equal(schema.resolved.sound, 'string:default')
+test('the schema declares exactly the live options volatile, in form order', () => {
+  const schema = buildConfigSchema(createFakeSchema())
+  assert.deepEqual(Object.keys(schema.dict), [...LIVE_OPTIONS, ...ORDINARY_OPTIONS])
+  for (const key of LIVE_OPTIONS) {
+    assert.equal(schema.dict[key].live, true, `${key} is a live field`)
+    assert.equal(typeof schema.dict[key].description, 'string', `${key} carries a form hint`)
+  }
+  for (const key of ORDINARY_OPTIONS) {
+    assert.equal(schema.dict[key].live, false, `${key} stays composition-only`)
+    assert.notEqual(typeof schema.dict[key].description, 'string', `${key} is never shown in the form`)
+  }
 })
 
 test('every schema default mirrors the plugin default', () => {
-  const schema = buildSettingsSchema(createFakeSchema())
-  // The two non-boolean kinds, so the assertion can name the control each
-  // option is declared as instead of guessing from the default's type.
-  const kindOf = (key) => {
-    if (key === 'disappearAfterMs' || key === 'minTaskDurationMs') return 'number'
-    if (key === 'sound' || key === 'launchUrl') return 'string'
-    return 'boolean'
-  }
-  for (const key of SETTINGS_OPTIONS) {
-    assert.equal(
-      schema.resolved[key],
-      `${kindOf(key)}:${String(DEFAULT_CONFIG[key])}`,
-      `${key} default`,
-    )
+  const schema = buildConfigSchema(createFakeSchema())
+  // The kind follows from the default's own type, so a new option is covered
+  // without this test having to grow a lookup table alongside it.
+  const kindOf = (value) =>
+    typeof value === 'boolean' ? 'boolean' : typeof value === 'number' ? 'number' : 'string'
+  for (const [key, node] of Object.entries(schema.dict)) {
+    assert.equal(node.kind, kindOf(DEFAULT_CONFIG[key]), `${key} control`)
+    assert.equal(node.value, DEFAULT_CONFIG[key], `${key} default`)
   }
 })
 
 test('building a schema is inert without schemastery', () => {
-  assert.equal(buildSettingsSchema(undefined), undefined)
+  assert.equal(buildConfigSchema(undefined), undefined)
 })
 
 test('the schema loader agrees with the schema it produced', () => {
-  assert.equal(SETTINGS_SCHEMA === undefined, loadSchema() === undefined)
+  // `Config` is built once from `loadSchema()` at module evaluation, so the two
+  // must always agree about whether schemastery was there at all.
+  assert.equal(Config === undefined, loadSchema() === undefined)
 })
 
-test('the composition base carries the namespace options and nothing else', () => {
-  const config = normalizeConfig({ notifyOnComplete: false, logFile: 'C:\\tmp\\n.log', maxConcurrent: 4 })
-  const base = settingsBase(config)
-  assert.deepEqual(Object.keys(base).sort(), [...SETTINGS_OPTIONS].sort())
-  assert.equal(base.notifyOnComplete, false)
-  assert.equal(base.disappearAfterMs, 6000)
-  assert.equal(base.logFile, undefined)
-  assert.equal(base.maxConcurrent, undefined)
+test('readField unwraps a volatile reference and leaves plain data alone', () => {
+  let value = false
+  const ref = { get: () => value }
+  assert.equal(readField(ref), false)
+  value = true
+  assert.equal(readField(ref), true, 'the reference is read, not its value at build time')
+  assert.equal(readField('silent'), 'silent')
+  assert.equal(readField(6000), 6000)
+  assert.equal(readField(undefined), undefined)
 })
 
-test('the real schema resolves a full section', schemaOnly, () => {
-  const resolved = SETTINGS_SCHEMA({ ...settingsBase(DEFAULT_CONFIG) })
-  assert.deepEqual(Object.keys(resolved).sort(), [...SETTINGS_OPTIONS].sort())
-  assert.equal(resolved.disappearAfterMs, 6000)
-  assert.equal(resolved.sound, 'default')
+test('readConfig flattens a resolved row config into plain values', () => {
+  let enabled = false
+  const resolved = {
+    enabled: { get: () => enabled },
+    disappearAfterMs: { get: () => 6000 },
+    appId: 'aumid',
+    timeoutMs: 15000,
+  }
+  assert.deepEqual(readConfig(resolved), {
+    enabled: false,
+    disappearAfterMs: 6000,
+    appId: 'aumid',
+    timeoutMs: 15000,
+  })
+  enabled = true
+  assert.equal(readConfig(resolved).enabled, true, 'a volatile field is re-read, never cached')
+  for (const malformed of [undefined, null, 'nonsense', [], 7]) {
+    assert.deepEqual(readConfig(malformed), {}, `${String(malformed)} flattens to nothing`)
+  }
 })
 
-/** A Cordis-context stand-in: listeners that can really be removed. */
+test('the real schema resolves 14 volatile fields and 5 plain ones', schemaOnly, () => {
+  const resolved = Config({ enabled: false, disappearAfterMs: 0 })
+  assert.deepEqual(
+    Object.keys(resolved).sort(),
+    [...LIVE_OPTIONS, ...ORDINARY_OPTIONS].sort(),
+    'the schema declares every option and nothing else',
+  )
+  for (const key of LIVE_OPTIONS) {
+    assert.equal(typeof resolved[key]?.get, 'function', `${key} arrives as a volatile reference`)
+  }
+  for (const key of ORDINARY_OPTIONS) {
+    assert.notEqual(typeof resolved[key]?.get, 'function', `${key} arrives as plain data`)
+  }
+  assert.equal(resolved.enabled.get(), false, 'the row config wins over the default')
+  assert.equal(resolved.disappearAfterMs.get(), 0)
+  assert.equal(resolved.sound.get(), DEFAULT_CONFIG.sound)
+  assert.equal(resolved.logFile.get(), '')
+  assert.equal(resolved.appId, DEFAULT_CONFIG.appId)
+
+  const plain = readConfig(resolved)
+  assert.equal(Object.keys(plain).length, LIVE_OPTIONS.length + ORDINARY_OPTIONS.length)
+  assert.equal(plain.enabled, false)
+  assert.equal(plain.disappearAfterMs, 0)
+  assert.equal(plain.appId, DEFAULT_CONFIG.appId)
+})
+
+test('the real schema rejects a value of the wrong type', schemaOnly, () => {
+  assert.throws(() => Config({ enabled: 'yes' }))
+  assert.throws(() => Config({ disappearAfterMs: 'soon' }))
+})
+
+/** A volatile reference stand-in: one value the Harness rewrites in place. */
+function liveRef(initial) {
+  let value = initial
+  return {
+    get: () => value,
+    set: (next) => {
+      value = next
+    },
+  }
+}
+
+/** A live-session stand-in exposing only what the plugin reads. */
+function fakeSession(id) {
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+  return { seq: events.length, header: { id, cwd: 'D:\\work\\demo' }, eventAt: (seq) => events[seq] }
+}
+
+/**
+ * A Cordis-context stand-in: listeners that can really be removed, effects that
+ * run immediately, and an `inject` that waits for its services the way Cordis
+ * does.
+ */
 function createContext(services) {
   const listeners = new Map()
-  const effects = []
+  const disposers = []
+  const injectRequests = []
   const pending = []
+  const fiber = { id: 'row-fiber' }
+
+  /** Hand one callback the child context Cordis would build for it. */
+  const deliver = (dependencies, callback) => {
+    const injected = {
+      ...context,
+      // A child context has its own effect scope, so the effect it registers is
+      // not mistaken for one of the plugin's own.
+      effect(effectCallback) {
+        const dispose = effectCallback()
+        return () => {
+          if (typeof dispose === 'function') dispose()
+        }
+      },
+    }
+    for (const dependency of dependencies) injected[dependency] = services[dependency]
+    callback(injected)
+  }
+
   const context = {
     listeners,
-    effects,
+    disposers,
+    injectRequests,
+    fiber,
     on(event, handler, options) {
       const bucket = listeners.get(event) ?? []
       const entry = { handler, options }
@@ -142,18 +256,17 @@ function createContext(services) {
     },
     /**
      * Cordis runs the callback once every named service exists and hands it a
-     * context that exposes them as properties. A service that only appears
-     * after `apply` still reaches the consumer — which is exactly why a plugin
-     * waits instead of sampling the service once.
+     * child context exposing them as properties. A service that only appears
+     * after `apply` still reaches the consumer — which is why a plugin waits
+     * instead of sampling the service once.
      */
     inject(dependencies, callback) {
-      const open = () => {
-        const injected = { ...context }
-        for (const dependency of dependencies) injected[dependency] = services[dependency]
-        callback(injected)
+      injectRequests.push([...dependencies])
+      if (dependencies.every((dependency) => services[dependency] !== undefined)) {
+        deliver(dependencies, callback)
+      } else {
+        pending.push({ dependencies, callback })
       }
-      if (dependencies.every((dependency) => services[dependency] !== undefined)) open()
-      else pending.push({ dependencies, open })
       return () => {}
     },
     /** Publish a service the way the composition does when its row activates. */
@@ -162,11 +275,11 @@ function createContext(services) {
       for (const entry of [...pending]) {
         if (!entry.dependencies.every((dependency) => services[dependency] !== undefined)) continue
         pending.splice(pending.indexOf(entry), 1)
-        entry.open()
+        deliver(entry.dependencies, entry.callback)
       }
     },
     effect(callback) {
-      effects.push(callback)
+      disposers.push(callback())
       return () => {}
     },
     logger: { info() {} },
@@ -174,79 +287,76 @@ function createContext(services) {
   return context
 }
 
-/** A settings-service stand-in owning one namespace and its watchers. */
+/**
+ * The Host's settings service stand-in.
+ *
+ * It has no `register`: a row no longer owns a namespace. The only thing a row
+ * may still say is that it opts out of the page the settings system generates
+ * from its own schema.
+ */
 function createFakeSettings() {
-  const registrations = []
-  const watchers = []
-  let section = {}
+  const configureCalls = []
   return {
-    registrations,
-    register(ns, schema, options) {
-      registrations.push({ ns, schema, options })
-      section = { ...(options?.base ?? {}) }
-      return {
-        get: () => section,
-        watch(callback) {
-          watchers.push(callback)
-          return () => {
-            const index = watchers.indexOf(callback)
-            if (index >= 0) watchers.splice(index, 1)
-          }
-        },
-        update: async () => {},
-        replace: async () => {},
-      }
-    },
-    /** Commit a change the way a user's save would. */
-    commit(patch) {
-      const previous = section
-      section = { ...section, ...patch }
-      for (const watcher of [...watchers]) watcher(section, previous)
+    configureCalls,
+    configure(options, fiber) {
+      configureCalls.push({ options, fiber })
+      return () => {}
     },
   }
 }
 
-/** A live-session stand-in exposing only what the plugin reads. */
-function fakeSession(id) {
-  const events = [
-    { type: 'turn/start', data: { turn: 1 } },
-    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
-  ]
-  return { seq: events.length, header: { id, cwd: 'D:\\work\\demo' }, eventAt: (seq) => events[seq] }
-}
-
 /**
- * Run the plugin body over one fake settings service.
+ * Run the plugin body over one row's resolved config.
  *
- * @param t - the test context, for the temporary log file.
- * @param config - the composition row config.
- * @param settings - the settings stand-in, or `undefined` for a profile without one.
- * @param session - the live session to report on.
- * @returns the probe surface: the context, the settings service, and the log.
+ * The Loader hands `apply` a resolved config in which every `.volatile()` field
+ * is a stable reference and every ordinary one is plain data, so that is what
+ * this builds. `refs` exposes those references, so a test can rewrite one in
+ * place the way a saved form value does, and the probe log file records every
+ * decision the plugin makes.
  */
-function mountHost(t, config, settings, session = fakeSession('session-cccc1111-2222')) {
+function mountHost(
+  t,
+  { config = {}, settings, session = fakeSession('session-cccc1111-2222'), services = {} } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-windows-notifier-settings-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
-  const logFile = join(dir, 'notifier.log')
+  const probeLog = join(dir, 'notifier.log')
+  /** Read a probe file, returning `''` while it does not exist yet. */
+  const readLog = (path) => {
+    try {
+      return readFileSync(path, 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  const refs = new Map()
+  const raw = {}
+  for (const key of LIVE_OPTIONS) refs.set(key, liveRef(DEFAULT_CONFIG[key]))
+  refs.get('logFile').set(probeLog)
+  for (const key of ORDINARY_OPTIONS) raw[key] = DEFAULT_CONFIG[key]
+  // A missing toast script keeps the transport a logged no-op.
+  raw.scriptPath = join(dir, 'missing-toast.ps1')
+  for (const [key, value] of Object.entries(config)) {
+    if (refs.has(key)) refs.get(key).set(value)
+    else raw[key] = value
+  }
+  for (const [key, ref] of refs) raw[key] = ref
+
   const ctx = createContext({
     sessions: { get: (id) => (session.header.id === id ? session : undefined) },
     sessionTitle: { get: () => ({ title: '重构支付模块' }) },
     ...(settings === undefined ? {} : { settings }),
+    ...services,
   })
-  // A missing toast script keeps the transport a logged no-op.
-  apply(ctx, { logFile, scriptPath: join(dir, 'missing-toast.ps1'), ...config })
-  // Effects run the way Cordis runs them: immediately, keeping their disposer.
-  for (const callback of ctx.effects) callback()
+  apply(ctx, raw)
   return {
     ctx,
+    refs,
     settings,
-    log: () => {
-      try {
-        return readFileSync(logFile, 'utf8')
-      } catch {
-        return ''
-      }
-    },
+    logFile: probeLog,
+    log: () => readLog(probeLog),
+    readLog,
   }
 }
 
@@ -258,83 +368,136 @@ function fire(ctx, event, ...args) {
   return (ctx.listeners.get(event) ?? []).map(({ handler }) => handler(...args))
 }
 
-test('the namespace is registered over the composition row config', schemaOnly, windowsOnly, (t) => {
+/** How many notifications of one decision the probe log holds. */
+function countOf(log, pattern) {
+  return (log.match(pattern) ?? []).length
+}
+
+test('the row opts out of the generated page once, through the injected child', windowsAndSchema, (t) => {
   const settings = createFakeSettings()
-  const { log } = mountHost(t, { notifyOnComplete: false, maxConcurrent: 4 }, settings)
+  const probe = mountHost(t, { settings })
 
-  assert.equal(settings.registrations.length, 1)
-  const [registration] = settings.registrations
-  assert.equal(registration.ns, SETTINGS_NAMESPACE)
-  assert.equal(registration.options.applies, 'live')
-  assert.equal(registration.options.base.notifyOnComplete, false, 'the row config is the base layer')
-  assert.equal(registration.options.base.maxConcurrent, undefined, 'process-level knobs stay out')
-  assert.match(log(), /settings namespace 'dsh-windows-notifier' registered/)
+  assert.equal(settings.configureCalls.length, 1, 'one policy per registration, never two')
+  assert.deepEqual(settings.configureCalls[0].options, { auto: false })
+  assert.equal(settings.configureCalls[0].fiber, probe.ctx.fiber, 'the policy is owned by the row fiber')
+  // The policy rides on the injected child, so the row's own effect scope holds
+  // only the toast transport.
+  assert.equal(probe.ctx.disposers.length, 1)
+  assert.equal(typeof probe.ctx.disposers[0], 'function')
+  assert.deepEqual(
+    probe.ctx.injectRequests,
+    [['settings'], ['sessions'], ['sessionTitle']],
+    'the settings service is injected, not sampled once (and before the platform guard)',
+  )
 })
 
-test('a value from the settings document beats the composition row config', schemaOnly, windowsOnly, (t) => {
+test('a settings service that arrives after apply still opts the row out', windowsAndSchema, (t) => {
+  const probe = mountHost(t)
   const settings = createFakeSettings()
-  const session = fakeSession('session-dddd1111-2222')
-  const { ctx, log } = mountHost(t, { notifyOnComplete: true }, settings, session)
-
-  fire(ctx, ...running(session.header.id))
-  fire(ctx, ...idle(session.header.id))
-  assert.match(log(), /notify complete: ✅ 对话已完成 \/ 重构支付模块/)
-
-  settings.commit({ notifyOnComplete: false })
-  assert.match(log(), /reconfigured \(/)
-  fire(ctx, ...running(session.header.id))
-  fire(ctx, ...idle(session.header.id))
-  assert.match(log(), /skip complete: switch off/)
-})
-
-test('disabling from the settings document takes the listeners off again', schemaOnly, windowsOnly, (t) => {
-  const settings = createFakeSettings()
-  const session = fakeSession('session-eeee1111-2222')
-  const { ctx, log } = mountHost(t, { enabled: false, scriptPath: '' }, settings, session)
-
-  assert.equal((ctx.listeners.get('internal/dispatch') ?? []).length, 0, 'a disabled row listens to nothing')
-  assert.equal(settings.registrations.length, 1, 'but its card still exists, so it can be turned back on')
-
-  settings.commit({ enabled: true })
-  assert.equal((ctx.listeners.get('internal/dispatch') ?? []).length, 1)
-  fire(ctx, ...running(session.header.id))
-  fire(ctx, ...idle(session.header.id))
-  assert.match(log(), /notify complete: ✅ 对话已完成/)
-
-  settings.commit({ enabled: false })
-  assert.equal((ctx.listeners.get('internal/dispatch') ?? []).length, 0)
-  assert.match(log(), /listening stopped: disabled/)
-})
-
-test('a profile without a settings service stays composition-only', windowsOnly, (t) => {
-  const { log } = mountHost(t, {}, undefined)
-  assert.match(log(), /waiting for the settings service/)
-  assert.match(log(), /active \(appId=/)
-})
-
-test('a settings service that arrives after apply still gets the namespace', schemaOnly, windowsOnly, (t) => {
-  const probe = mountHost(t, {}, undefined)
-  assert.match(probe.log(), /waiting for the settings service/)
-  assert.doesNotMatch(probe.log(), /registered/)
+  assert.equal(settings.configureCalls.length, 0)
 
   // Now the composition mounts the provider, exactly as it does in a profile
   // where the settings row activates after this one.
-  const settings = createFakeSettings()
   probe.ctx.provide('settings', settings)
-  assert.equal(settings.registrations.length, 1)
-  assert.equal(settings.registrations[0].ns, 'dsh-windows-notifier')
-  assert.match(probe.log(), /settings namespace 'dsh-windows-notifier' registered/)
-
-  // ...and the namespace is live, not just registered.
-  settings.commit({ openOnClick: false })
-  assert.match(probe.log(), /reconfigured \(disappearAfterMs=6000, openOnClick=false/)
+  assert.equal(settings.configureCalls.length, 1)
+  assert.deepEqual(settings.configureCalls[0].options, { auto: false })
+  assert.equal(settings.configureCalls[0].fiber, probe.ctx.fiber)
 })
 
-test('the live options reach the toast transport', schemaOnly, windowsOnly, (t) => {
-  const settings = createFakeSettings()
-  const { log } = mountHost(t, { disappearAfterMs: 6000, openOnClick: true }, settings)
-  assert.match(log(), /active \(appId=.*, includeSubagents=false, disappearAfterMs=6000, openOnClick=true\)/)
+test('a value the Harness rewrites in place is obeyed without a re-apply', windowsOnly, (t) => {
+  const session = fakeSession('session-dddd1111-2222')
+  const probe = mountHost(t, { config: { notifyOnComplete: true }, session })
+  const attached = () => (probe.ctx.listeners.get('internal/dispatch') ?? []).length
 
-  settings.commit({ disappearAfterMs: 0, openOnClick: false })
-  assert.match(log(), /reconfigured \(disappearAfterMs=0, openOnClick=false/)
+  assert.equal(attached(), 1)
+  fire(probe.ctx, ...running(session.header.id))
+  fire(probe.ctx, ...idle(session.header.id))
+  assert.match(probe.log(), /notify complete: ✅ 对话已完成 \/ 重构支付模块/)
+  assert.equal(countOf(probe.log(), /notify complete/g), 1)
+
+  // A form save rewrites the very reference `apply` was handed; nothing
+  // re-applies the plugin or re-registers its listeners.
+  probe.refs.get('notifyOnComplete').set(false)
+  assert.equal(attached(), 1, 'the listeners were never torn down')
+  fire(probe.ctx, ...running(session.header.id))
+  fire(probe.ctx, ...idle(session.header.id))
+  assert.match(probe.log(), /skip complete: switch off/)
+  assert.equal(countOf(probe.log(), /notify complete/g), 1)
+
+  probe.refs.get('notifyOnComplete').set(true)
+  fire(probe.ctx, ...running(session.header.id))
+  fire(probe.ctx, ...idle(session.header.id))
+  assert.equal(countOf(probe.log(), /notify complete/g), 2, 'and the switch turns back on live')
+})
+
+test('enabled gates every report while the listeners stay attached', windowsOnly, (t) => {
+  const session = fakeSession('session-eeee1111-2222')
+  const probe = mountHost(t, { config: { enabled: false }, session })
+
+  // Unlike the namespace-era plugin, a disabled row is attached and silent
+  // rather than detached: `enabled` is read before each report instead.
+  assert.equal((probe.ctx.listeners.get('internal/dispatch') ?? []).length, 1)
+  assert.match(probe.log(), /disabled by config/)
+  fire(probe.ctx, ...running(session.header.id))
+  fire(probe.ctx, ...idle(session.header.id))
+  assert.equal(countOf(probe.log(), /notify complete/g), 0)
+
+  probe.refs.get('enabled').set(true)
+  fire(probe.ctx, ...running(session.header.id))
+  fire(probe.ctx, ...idle(session.header.id))
+  assert.equal(countOf(probe.log(), /notify complete/g), 1)
+
+  probe.refs.get('enabled').set(false)
+  fire(probe.ctx, ...running(session.header.id))
+  fire(probe.ctx, ...idle(session.header.id))
+  assert.equal(countOf(probe.log(), /notify complete/g), 1, 'a disabled row stays silent')
+  assert.equal((probe.ctx.listeners.get('internal/dispatch') ?? []).length, 1)
+})
+
+test('the live transport knobs reach the next notification', windowsOnly, (t) => {
+  const probe = mountHost(t, {
+    config: { openOnClick: true, launchUrl: '' },
+    services: { webServer: { port: 3080 } },
+  })
+
+  // The session is unattached, which still reports a completion.
+  fire(probe.ctx, ...idle('session-headless-0001'))
+  assert.match(probe.log(), /-> http:\/\/127\.0\.0\.1:3080/)
+  assert.equal(countOf(probe.log(), /->/g), 1)
+
+  probe.refs.get('openOnClick').set(false)
+  fire(probe.ctx, ...idle('session-headless-0002'))
+  assert.equal(countOf(probe.log(), /->/g), 1, 'an inert toast carries no URL')
+
+  probe.refs.get('openOnClick').set(true)
+  probe.refs.get('launchUrl').set('http://example.test/#{sessionId}')
+  fire(probe.ctx, ...idle('session-headless-0003'))
+  assert.match(probe.log(), /-> http:\/\/example\.test\/#session-headless-0003/)
+  assert.equal(countOf(probe.log(), /->/g), 2)
+})
+
+test('a log file chosen in the form takes over without a re-apply', windowsOnly, (t) => {
+  const probe = mountHost(t)
+  fire(probe.ctx, ...idle('session-headless-0004'))
+  const first = probe.log()
+  assert.match(first, /notify complete/)
+
+  const moved = join(dirname(probe.logFile), 'moved.log')
+  probe.refs.get('logFile').set(moved)
+  assert.equal(probe.readLog(moved), '', 'nothing is written until the next decision')
+
+  fire(probe.ctx, ...idle('session-headless-0005'))
+  assert.match(probe.readLog(moved), /notify complete/)
+  assert.equal(probe.log(), first, 'the old file is left alone')
+})
+
+test('a profile without a settings service keeps notifying', windowsOnly, (t) => {
+  const probe = mountHost(t)
+  assert.ok(
+    probe.ctx.injectRequests.some((request) => request.length === 1 && request[0] === 'settings'),
+    'the row waits instead of failing',
+  )
+  fire(probe.ctx, ...idle('session-headless-0006'))
+  assert.match(probe.log(), /notify complete/)
+  assert.match(probe.log(), /active \(appId=/)
 })

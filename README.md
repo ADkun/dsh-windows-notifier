@@ -59,81 +59,131 @@ DSH 在每个子会话的 durable header 上盖了 `origin: 'subagent'`（连同
 
 ## 安装
 
-DSH 的能力全是 `cordis.yml` 里的一行行插件。装一个第三方插件 = **装包** + **加一行**。
+DSH 的能力全是 `cordis.yml` 里的一行行插件。装一个第三方插件 = **装包**（+ 让它在 profile 里被选中）。从 0.2.0 起这个包自己带一层 bundle patch，所以「加一行」这一步由 DSH 自己做，见下面第 2 步。
+
+装包这一步的落点由本版 DSH 定死：插件包只能从 **Desktop 安装目录**和**当前 profile 自己的 `node_modules`** 解析出来。旧文档里那个"所有 profile 共享的解析根"已被判过时（错误原文、源码位置与本机量法见「把所有 profile 一次装完」）。
 
 ### 1. 把包装进 profile
 
 ```powershell
-# 从 GitHub 装（推荐）
-dsh plugin --profile web add https://github.com/ADkun/dsh-windows-notifier.git
+# 从本仓库装：默认装进每一个有 package.json 的 profile
+powershell -NoProfile -File scripts\sync-to-profile.ps1
 
-# 或者从本地目录装
-dsh plugin --profile web add D:\path\to\dsh-windows-notifier
+# 只装一个 profile
+powershell -NoProfile -File scripts\sync-to-profile.ps1 -Profile web
 ```
 
-> `dsh plugin` 只是把参数转发给 profile 目录里的 pnpm。如果机器上没有 pnpm，可以手动把仓库目录放到 profile 的 `node_modules` 下（见下方「没有 pnpm 时」）。
+（`pwsh -File …` 等价，只要装了 PowerShell 7；`powershell` 是 Windows 自带的那一个，一定能跑。）
 
-### 2. 加一行到 profile 的 patch 层
+这个脚本真正做了什么：
 
-编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`（Windows 上通常是
-`C:\Users\<你>\.dsh\profiles\web\cordis.patch.yml`）：
+1. `npm pack` 把仓库打成 `dist\dsh-windows-notifier-<版本>.tgz`，内容由 `package.json` 的 `files` 字段决定（与 npm 发布一致；`dist\` 不进版本库）。本机实测（2026-09-28，`npm pack --dry-run --json`，0.2.0）：打进包的条目是 `package.json`、`cordis.patch.yml`、`src\*.js`、`scripts\toast.ps1`、`scripts\send-test-toast.mjs`、`scripts\sync-to-profile.ps1`、`examples\cordis.patch.yml`、`README.md`、`LICENSE` —— `test\` 不在其中；
+2. 对每个目标 profile 执行 `dsh plugin --profile <profile> add "file:<tgz 的绝对路径>"` —— 与 Desktop「插件市场」走同一条路：往该 profile 的 `package.json` 加一条依赖，并在 profile 目录里运行 pnpm（`dsh plugin` 把参数原样转发给这个 pnpm，所以任何 pnpm 认的 spec 都能传）。包落在 `$DSH_HOME\profiles\<profile>\node_modules\dsh-windows-notifier`，是**真目录**（本机实测 2026-09-28：`profiles\web` 下装出来的那份 `LinkType` 为空，profile 的依赖记成 `file:D:/dsh/dsh-windows-notifier/dist/dsh-windows-notifier-0.2.0.tgz`）；
+3. 已经是该 profile 依赖的包会先 `remove` 再 `add`（原因见「改完源码怎么让它进环境」）；
+4. **`desktop` profile 会被跳过**：`dsh` 对它的每一条 `plugin` 子命令都直接拒绝（原文 `error: profile "desktop" is managed exclusively by the Electron application`，源码是 `@deepseek-ai/dsh/lib/bin.js` 里的 `rejectElectronProfile`）。它归 Desktop 应用管，请在应用里的插件市场升级（那边做的是同一套安装 + 选中）；
+5. `-DshHome` 指 DSH 用户根（默认 `$env:DSH_HOME`，再退到 `$HOME\.dsh`），`-Dsh` 指 `dsh` 命令；
+6. 每个 profile 装完后核对它自己的 `dsh.profile.bundles` 里确实有 `dsh-windows-notifier`，缺了就补上（原因见下一条），并在这份机器级 patch 里发现本插件的行时给出警告（原因见「别把这一行放回机器级」）。
+
+**装包 ≠ 选中。** `dsh plugin add` 转发给 pnpm 之后，CLI 还会做一次「已安装的 bundle 声明对账」：清单里声明了 `dsh.bundle` 的依赖会被补进 `dsh.profile.bundles`（`@deepseek-ai/dsh-app-boot` 的 `reconcileProfilePlugins`）。本机实测 2026-09-28：这次写在命令返回之后才落盘 —— 装完立刻读 `package.json` 有可能读到还没补上的那一刻，所以脚本自己再核对一遍、缺了就写。**只是依赖、没被选中 = 没有行、没有配置页**，这是最容易「装好了却什么都没发生」的地方。
+
+**为什么是 tarball，而不是把仓库目录链接进去：** 解析器只从两个根解析，其中 profile 侧要求解析到的清单路径落在该 profile 自己的 `node_modules` 之内 —— 共享父级一律不行；tarball 展开成的真目录正是市场安装的形状（源码级：DSH 把 profile 的 `pnpm-workspace.yaml` 固化成 `nodeLinker: hoisted`，所以 pnpm 把依赖铺成真目录，而不是 `.pnpm` 下的链接）。另外，pnpm 的 `link:` 装法（`dsh plugin add <本地目录>` 用的就是它）只链接一个目录，**不安装该包自己的依赖**，也不像市场安装那样把包记进依赖；它还省不掉重启：模块缓存的键是解析后的**真实路径**，链接最终仍指向仓库里那份文件，改它不会重新导入（源码级：解析器用 `realpathSync` 规整缓存键）。
+
+从 GitHub 装是另一条合法路径，但**本次未实测** —— `dsh plugin` 的后端是 pnpm，git 托管的 spec 由 pnpm 处理，DSH 的 CLI 对 `git+…` / `github:…` / `.git` 结尾的 spec 另有专门提示。形式例如：
+
+```powershell
+dsh plugin --profile web add github:ADkun/dsh-windows-notifier
+```
+
+量法：在一台没装过它的机器上跑这条命令，确认 profile 的 `package.json` 里出现该依赖、`(Get-Item $DSH_HOME\profiles\<profile>\node_modules\dsh-windows-notifier).LinkType` 为空（真目录），重启后宿主日志里没有 `failed to import`。这条路同样只服务你指定的那一个 profile。
+
+> `dsh` 从 PATH 上找 `pnpm`，找不到就打印 `dsh: pnpm was not found; install pnpm and make it available on PATH.`；Desktop 自带一份并把它放上 PATH（见「没有 pnpm 时」）。`--profile desktop` 一律不行 —— 见上面第 4 条。
+
+### 2. bundle 会自己带来那一行
+
+从 0.2.0 起这个包声明了自己的一层 bundle patch（`package.json` → `dsh.bundle.patch` → `cordis.patch.yml`）—— 这层带来的是**行本身**，所以 profile 里不用再手写那一行，只要把包**选中**（`dsh.profile.bundles` 里有它）。第 1 步的 `dsh plugin … add` 之后 CLI 会对账并补上这条选中（落盘可能晚一拍，脚本会自己核对、缺了就写）：
 
 ```yaml
+# 包自带的 cordis.patch.yml（bundle 层）
 - insert:
     - id: windows-notifier
       name: 'dsh-windows-notifier'
 ```
 
-`patchReload: live` 的 profile 会**热加载**这个改动，不用重启。
+这层带来的是**行本身**（上面那段就来自包里的 `cordis.patch.yml`）。`id` 是 `windows-notifier`，而它就是配置表格的地址：DSH 给每个已挂载的 profile 条目生成一份「Host 侧可校验的配置描述」，浏览器里的配置卡片按 `<包名>#<行 id>` 注册到「插件」页的那一行上。改这个 id，两侧都得跟着改。
 
-### 对所有 profile 生效
+行里**故意没有 `config:`** —— 每个开关都有 schema 默认值（见 `src/settings.js`），新装一个 profile 不需要写任何值。
 
-`$DSH_HOME/cordis.patch.yml`（即 `C:\Users\<你>\.dsh\cordis.patch.yml`）是**机器级**的 patch 层，在每个 profile 自己的 patch 之后应用。想一次管住所有 profile（web、headless、sdk…），就写在这里：
+**per-profile 的值写在该 profile 自己的 patch 文件里**，也就是界面保存时写的那一份：
 
 ```yaml
-- insert:
-    - id: windows-notifier
-      name: 'dsh-windows-notifier'
-      config:
-        includeSubagents: false
+# $DSH_HOME\profiles\<profile>\cordis.patch.yml
+- id: windows-notifier
+  name: 'dsh-windows-notifier'
+  config:
+    logFile: 'D:\dsh\dsh-windows-notifier\.dsh-windows-notifier.log'
 ```
 
-这样每个 profile 启动时都会挂载它。如果某个 profile 里没有 pnpm 装的包，需要保证包能被解析到 —— 最省事的做法是把它放进 profile 目录的公共 `node_modules`（`$DSH_HOME/profiles/node_modules/`），Node 的解析会从每个 profile 目录向上找到它。
+`patchReload: live` 的 profile 会**热加载** `config:` 改动，不用重启；但**换掉 `src/` 里的代码必须重启**（模块缓存按解析后的真实路径做键，不会重新 import）。
+
+> **别把这一行放回机器级 `$DSH_HOME\cordis.patch.yml`。** 两层原因：patch 命中一个已存在的 id 时是**整体替换**它的 `config` 对象（`dsh-app-boot` 的 `applyEntryPatches` 写的是 `target.config = value`），而机器级在每个 profile 之后应用 —— 界面上保存的值会被它悄悄盖掉；并且 Host 会直接拒绝这次保存，原文是 `Configuration for "<id>" is overridden by a home patch or command-line overlay`。症状是配置页能看、不能存。（2026-09-28 迁移时本机就是这么放的，那一行已删。）
+
+### 把所有 profile 一次装完
+
+机器级 `$DSH_HOME/cordis.patch.yml`（即 `C:\Users\<你>\.dsh\cordis.patch.yml`）仍然是「在每个 profile 自己的 patch 之后应用」的那一层，但**不再放这个插件的行**。要一次装到所有 profile，就是让脚本对每个 profile 各跑一次 `dsh plugin … add`，并让每个 profile 各自选中自己的 bundle：
+
+```powershell
+powershell -NoProfile -File scripts\sync-to-profile.ps1
+```
+
+**选中 ≠ 包能解析**：行由 bundle 层带来，包仍必须能从**每个** profile 自己的 `node_modules` 解析到，所以脚本不带参数时默认装进每一个有 `package.json` 的 profile（`desktop` 除外，见第 4 条），并在装完后逐个核对 `dsh.profile.bundles` 里确实有它（只是依赖、没被选中 = 没有行、没有配置页）。以后新建了 profile，要再跑一次脚本。
+
+`pwsh`（PowerShell 7）不是 Windows 自带的；脚本用任意一个都能跑，上面写 `powershell` 是因为它一定在。
+
+> **历史（已失效）：共享解析根。** 旧文档把这包装复制（或建目录联接）到 `$DSH_HOME\profiles\node_modules`，称它是"每个 profile 共享的解析根，Node 从 profile 目录向上上溯就能找到它"。本版 Desktop 反过来把这个共享父级当成**过时落点**：
+>
+> - 源码级：解析器只在 Desktop 安装目录与当前 profile 之间二选一（构造错误在 Desktop 安装目录的 `resources\app\lib\package-overlay-*.js`），并且要求 profile 侧解析到的清单路径落在 `<profileDir>\node_modules` 之内；共享父级在解析器的源码里就叫 `sharedFallbackDirectory`，落在里面的解析结果被判过时（`isObsoleteProfileFallback*`，见 `lib\module-resolution-*.js`）。
+> - 本机实测（2026-09-27）：把包装进 `$DSH_HOME\profiles\node_modules` 时，解析直接失败，原文是 `dsh-plugin-desktop: cannot resolve package "dsh-windows-notifier" from the Desktop installation or active Profile`；同时宿主日志长期出现 loader 告警 `2026-09-27 15:01:53.779 [W] [hmr] windows-notifier (dsh-windows-notifier): failed to import` —— 机器级 patch 那一行在每个 profile 上都生效，而包躺在被拒绝的那个根里。那个旧目录到今天仍在（`scripts/sync-to-profile.ps1` 只报告、不删）。
 
 完整示例见 [`examples/cordis.patch.yml`](examples/cordis.patch.yml)。
 
 ### 没有 pnpm 时
 
-把仓库以目录联接（或直接复制）的方式放进公共模块目录即可：
+`dsh plugin --profile … add` 的底层是 pnpm，并且**要求 `pnpm` 在 PATH 上** —— 找不到时它会打印 `dsh: pnpm was not found; install pnpm and make it available on PATH.`。Desktop 自带一份并把它放上 PATH（本机实测：`Get-Command pnpm` 命中 `%APPDATA%\DSH Desktop\runtime-commands\…\bin\pnpm.cmd`），所以在 DSH 会话里通常不用管。
+
+确实没有 pnpm 时，可行的手工路线只有一条：**在别处 `npm pack` 出 tarball，再把里面的 `package\` 展开成该 profile 自己的 `node_modules` 目录**（真目录）：
 
 ```powershell
-New-Item -ItemType Junction `
-  -Path "$env:USERPROFILE\.dsh\profiles\node_modules\dsh-windows-notifier" `
-  -Target "D:\path\to\dsh-windows-notifier"
+$tgz = npm pack D:\path\to\dsh-windows-notifier --pack-destination $env:TEMP   # 打印出 tarball 文件名
+tar -xzf "$env:TEMP\$tgz" -C $env:TEMP
+$dest = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-windows-notifier"
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Copy-Item -Recurse -Force "$env:TEMP\package\*" $dest
 ```
+
+**未实测**：这条路本次没有走。量法：删掉某个 profile 里已经装好的包（连目录一起删），按上面展开，重启 DSH，然后看宿主日志有没有 `failed to import`，以及（开着 `notifyOnActivate: true` 或 `logFile` 时）插件有没有写激活记录。注意手工展开**不会**给 profile 的 `package.json` 加依赖条目，`dsh plugin … remove` 也管不到它 —— 卸载要自己删目录。
 
 插件本身零依赖、零构建，所以不需要 `npm install` / `pnpm install`。
 
-### 同步已部署的副本
+### 改完源码怎么让它进环境
 
-用「复制」而不是「联接」部署时，仓库的改动**不会**自己走进 profile —— 复制过去的那份是个快照，而 DSH 也不会提示你它已经旧了。这正是「仓库里修好了、环境里照旧弹通知」这类问题的成因。改完源码后跑一次：
+改完仓库里的源码，重跑一次脚本，然后**重启 DSH**：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\sync-to-profile.ps1
+powershell -NoProfile -File scripts\sync-to-profile.ps1
 ```
 
-它按 `package.json` 的 `files` 字段（也就是 npm 实际发布的那几个条目）重建 `$DSH_HOME/profiles/node_modules/dsh-windows-notifier`；如果那个路径本来是目录联接，它会直接告诉你不用同步。默认用 `$env:DSH_HOME`，也可以用 `-ProfilesRoot` 指别处。
+脚本内部是**先 `remove` 再 `add`**，而不是直接 `add`：pnpm 对"路径和版本都没变、只有内容变了"的本地 tarball 会判成 `Already up to date` 而不重装（本机实测 2026-09-27：直接 `add` 打印 `Already up to date`，profile 里那份的 SHA256 一个字节没变；`remove` 后 `add` 才真的替换）。这正是"改了源码重跑脚本"能进到环境里的原因。版本号不必每次 bump —— `remove`/`add` 已经处理了内容变化。
+
+重启也不是可选项：loader 按解析到的路径缓存 ES module，被替换的文件不会被重新 import（详见下一节）。现在也**没有"复制式部署的副本"这回事了**：包由 tarball 展开进 profile，改源码得到的是**一份新 tarball**（路径相同、版本号可能相同，内容不同）—— 所以旧文档那句"副本不会自己更新"，现在读作"环境里那份不会自己更新，只能重跑脚本 + 重启"。值得补一句：它同样**不会提示你已经旧了**，那正是"仓库里修好了、环境里照旧"这类问题的成因。
 
 ### 改配置 vs 改源码：热加载的边界
 
 - **改 patch 文件**（开关、`logFile`、`launchUrl`…）→ `patchReload: live` 会立刻重挂载，马上生效。
-- **改界面里的设置**（设置 → 插件 → 插件配置）→ 立刻生效，见下面「界面化配置」。
-- **改插件源码** → **不会**立即生效。DSH 的 loader 按「模块解析后的路径」缓存 ESM 模块，并且在插件行的 `name` 没变时复用已经加载过的那个模块；同一个文件路径改内容也不会重新导入。要让新代码生效，要么重启对应 profile，要么把包放到一个**新路径**（换个目录、或复制一份到别处）再让行指向它。
+- **改界面里的设置**（设置 → 插件 → 本插件那一行的「配置」）→ 立刻生效，写的是该 profile 自己的 patch 文件，见下面「界面化配置」。
+- **改插件源码** → **不会**立即生效。要重跑一遍 `powershell -NoProfile -File scripts\sync-to-profile.ps1`（把新 tarball 装进每个 profile）**再重启 DSH**。DSH 的 loader 按「模块解析后的路径」缓存 ESM 模块，并且在插件行的 `name` 没变时复用已经加载过的那个模块；同一个文件路径改内容也不会重新导入。旧文档曾说"换个新路径（换个目录、或复制一份到别处）再让行指向它"就能生效 —— 在本版里这条也不可靠，而且得先把包解析到 profile 的 `node_modules` 里才谈得上换路径。
   浏览器半侧同理，而且更严格：客户端模块图按「解析后的说明符」缓存包元数据（包括"没有浏览器半侧"的否定结论），所以连"换个新路径的插件行"这条路也不通（实测：改成子路径说明符后这一行会导入失败），**只能重启一次**。
 
-> 上面「目录联接」的写法适合开发：联接指向仓库时，增删**文件**（路径变化）就能被重新导入，改同一个文件则不行。
->
-> 复制式部署则连这半条路都没有：源码改完记得跑 `scripts/sync-to-profile.ps1` 刷新副本，再重启。副本不会自己更新，也不会告诉你它旧了。
+> **历史（已失效）：用目录联接指向仓库来"热改"。** 旧文档说"联接指向仓库时，增删**文件**（路径变化）就能被重新导入，改同一个文件则不行"。本版不成立：(1) 联接到共享根 `$DSH_HOME\profiles\node_modules` 的那条路已被解析器拒绝（见「把所有 profile 一次装完」）；(2) 模块缓存的键是解析后的**真实路径**，联接最终仍指向仓库里那份文件，增删/改文件都不会改变这个键，因此什么都不会重新导入。要改源码生效，只有"重跑脚本 + 重启"。（本次对解析器函数单独做过一次探针：把联接放在**某个 profile 自己的** `node_modules\<name>` 下会被它接受；但这条没有在真实启动里验证，不作为做法推荐。）
 
 ## 配置项
 
@@ -163,13 +213,18 @@ powershell -ExecutionPolicy Bypass -File scripts\sync-to-profile.ps1
 
 > **「停留时长」能做的事，受 Windows 自己限制。** 横幅时长只有「约 5 秒 / 约 25 秒」两档，插件只能按 `disappearAfterMs` 选最近的一档（> 7000 用长档）；这个值同时通过 `ExpirationTime` 决定它**在通知中心里保留多久**，所以写 3000 并不会让横幅 3 秒就走。要让通知「无限等待」，用 `0`：插件会带上 `scenario="reminder"`，通知就一直留在屏幕上直到你手动关闭——这是 Windows 上唯一能做到这件事的方式。
 
+**哪些键能在界面里改：** 上表 19 个键里只有 14 个是「运行时真的会重读」的，也就是**可以在 设置 → 插件 → 本插件那一行的配置 里改**：`enabled`、`notifyOnComplete`、`notifyOnQuestion`、`notifyOnApproval`、`notifyOnError`、`notifyOnInterrupted`、`notifyOnActivate`、`includeSubagents`、`minTaskDurationMs`、`sound`、`disappearAfterMs`、`openOnClick`、`launchUrl`、`logFile`。剩下 5 个是安装期的固定设施（`appId`、`powershellPath`、`scriptPath`、`maxConcurrent`、`timeoutMs`），只能在 patch 里写 —— Host 会拒绝界面对它们的写入。分界线就在 `src/settings.js`：标了 `.volatile()` 的是前者。
+
 ## 界面化配置
 
-插件注册了一个 settings 命名空间 `dsh-windows-notifier`，并在 Web 界面的 **设置 → 插件 → 插件配置** 里贡献一张卡片。常用的开关都在卡片上：总开关、五类通知开关、停留时长、是否跳转、通知音、忽略短任务、点击地址。
+Web 界面的 **设置 → 插件** 里，本插件那一行会带一个配置页（卡片上是上面那 14 个可热改的键）。这套模型是 DSH 0.1.7 之后的样子，和旧版完全不同：
 
-- 卡片里保存的值写进 `$DSH_HOME/settings.yaml`，**优先级高于** patch 里的 `config:`；卡片上的「重置」让该字段重新继承 patch 的值。
-- 保存后**立刻生效**，不用重启：`enabled` 关掉会真的把监听摘掉，重新打开再挂回去。
-- 卡片是插件的**浏览器半侧**（`src/client.js`），按 DSH 的 lazy-CJS 客户端模块格式手写，所以仓库仍然零构建。注册命名空间需要 `@deepseek-ai/schemastery`（harness 自带）；环境里没有它时插件照常工作，只是没有这张卡片。
+- **没有"插件注册的 settings 命名空间"这回事了。** Host 给每个已挂载的 profile 条目生成一份配置描述（`@deepseek-ai/dsh-settings` 的 `describe()`，地址就是**条目自己的 id**），浏览器侧的 `configForms` 服务把它镜像出来，卡片按 `<包名>#<行 id>` —— 这里是 `dsh-windows-notifier#windows-notifier` —— 注册到那一行上。id 变了，卡片就找不到行。
+- **保存写的是该 profile 自己的 patch 文件**（`$DSH_HOME\profiles\<profile>\cordis.patch.yml`），不再是 `$DSH_HOME/settings.yaml`。一次保存 = 一次原子的、带 revision 栅栏的文档改动，Host 用行自己的 schema 重新校验；卡片上的「恢复默认」发一条 `unset`，让该字段重新继承 bundle 层的默认值。
+- **只允许写 `.volatile()` 字段**：`src/settings.js` 里标了 `.volatile()` 的 14 个就是全部可写路径，写别的 Host 直接拒。字段被机器级 patch 或命令行 overlay 盖住时也会拒，原文 `Configuration for "<id>" is overridden by a home patch or command-line overlay`。
+- **保存后立刻生效，不用重启。** 卡片改的是 `.volatile()` 引用，loader 就地改写它，宿主半侧每次做判断前都重读一遍 —— 包括总开关：关掉后不再有任何通知，但监听不摘，`enabled` 重新打开就立刻恢复（不再有"摘了挂不回来"的问题）。
+- 卡片是插件的**浏览器半侧**（`src/client.js`），按 DSH 的 lazy-CJS 客户端模块格式手写，所以仓库仍然零构建；界面文案走 Client 的 locale 服务（`zh` / `en` 两本词典）。
+- 行自己的 schema 需要 `@deepseek-ai/schemastery`（harness 自带）。环境里没有它时插件照常工作，只是**没有配置表格**（也就没有卡片）。
 - 装好后**需要重启一次 DSH** 卡片才会出现：客户端模块图按「解析后的说明符」缓存包元数据，其中也包括"这个包没有浏览器半侧"这个结论，所以新声明的浏览器半侧要等下一次启动才进入引导图。
 
 ## 验证
@@ -183,7 +238,9 @@ node scripts/send-test-toast.mjs "自定义标题" "自定义正文"
 
 看到通知就说明通道没问题，剩下的只是让 DSH 把事件交给插件。
 
-再验证插件本身：在配置里加 `notifyOnActivate: true`（或 `logFile: D:\dsn.log`），保存 patch 文件触发热加载，应该立刻弹出一条「已启用」通知 / 日志里出现 `[dsh-windows-notifier] active`。
+再验证插件本身：把 `notifyOnActivate` 打开（界面卡片里或 patch 里都行），然后保存 / 重启一次 —— 应该立刻弹出一条「已启用」通知，日志里出现 `[dsh-windows-notifier] active`。
+
+不重启也能离线核对这套组合：`dsh --profile <profile> --dump-config` 会把每个 bundle 层、该 profile 的 patch、机器级 patch 依次应用后的结果打出来；应该能看到 `windows-notifier` 这一行、`name: dsh-windows-notifier`，以及它的 `config:` 里那些值。这一条在改动 patch 之后最值得跑：图层顺序错了、id 打错了、机器级那一行还在，都会在这里显形（"机器级那一行还在"还会额外让界面保存被拒）。
 
 `logFile` 会记录**每一次决定**，包括每一次"没通知"的原因，例如：
 
@@ -199,9 +256,12 @@ skip question: switch off
 
 ## 卸载
 
-1. 从 patch 文件里删掉那一行（或加 `disabled: true`）；
-2. `dsh plugin --profile web remove dsh-windows-notifier`（手动放的目录直接删掉）；
-3. 顺手可以删掉 `$DSH_HOME/settings.yaml` 里残留的 `dsh-windows-notifier:` 分节（不删也无害，它只是没人读）。
+包分别装在每个 profile 自己的 `node_modules` 里，所以**每个装过的 profile 都要卸一次**：
+
+1. `dsh plugin --profile <profile> remove dsh-windows-notifier`（对每个装过的 profile 跑一次）。包一走，**行也就没了** —— 行是 bundle 层带来的，而这条选中项不该再留着（同一套「已安装 bundle 声明」对账会把它一并摘掉；若你的版本没摘，手工从 `dsh.profile.bundles` 里删掉这一项即可），不再需要手工删 patch 里的行；手工展开进目录的那种直接删掉那个目录；
+2. 想留着包但先关掉，就在该 profile 的 patch 里写 `disabled: true`（或直接用它那一行的开关）；
+3. 顺手可以删掉 `$DSH_HOME/settings.yaml` 里残留的 `dsh-windows-notifier:` 分节 —— 那是旧版（0.1.x）留下的，本版不读它，留着也无害；
+4. 旧落点 `$DSH_HOME\profiles\node_modules\dsh-windows-notifier`（历史遗留）本版已经不会被解析，可以删掉。
 
 ## 已知限制
 
@@ -212,14 +272,15 @@ skip question: switch off
 - **必须在有 DSH 事件的前提下工作**：headless / sdk 这类最小 profile 如果不发这些事件，插件会挂载但不产生通知。headless 收尾时会话可能已经 detach，这种情况下插件仍按「完成」通知（`idle` 只会在状态变化时发布，所以它本身就意味着有东西跑完过）。
 - **点击通知只能打开 GUI 首页**：DSH 的 Web GUI 把会话选择放在内存里，没有会话级路由，所以没有可深链的地址。`launchUrl` 里写 `{sessionId}` 会被替换，但目标页面目前不消费它。不想要这个跳转就把 `openOnClick` 关掉（patch 或界面里都行）。
 - **横幅时长只有两档**：见上面配置项下的说明；`0` 是唯一能"无限等待"的值（`scenario="reminder"`）。
-- **界面卡片的文案只有中文**：插件没有注册 locale 词典，卡片上的文案是写死的（用户是中文用户，README 也是中文优先）。要双语的话得再注册一个 locale 命名空间。
+- **必须重启一次，界面上的配置页才会出现**（原因见「界面化配置」最后一条）：浏览器半侧是在 DSH 启动时进入引导图的。
+- **界面卡片的文案是它自己带的**：`src/client.js` 里注册了 `zh` / `en` 两本词典，跟界面语言走。schema 里的字段说明（`src/settings.js` 的 `LIVE_DESCRIPTIONS`）只有中文，但那一页是 Host 自动生成的表格 —— 本插件把它关掉了（`configure({ auto: false })`，DSH 自己的插件也这么写），所以实际显示的是卡片自己的文案。
 - 通知不做「用户是否正在看这个会话」的判断 —— 前台会话结束同样会弹。
 
 ## 开发
 
 ```powershell
-node --test test        # 60 项测试：消息文案、配置归一化、事件接线、双通道去重、
-                        # 子会话识别（载荷自带 session / 创建公告兜底）、settings 命名空间与实时改配置、
+node --test test        # 66 项测试：消息文案、配置归一化、事件接线、双通道去重、
+                        # 子会话识别（载荷自带 session / 创建公告兜底）、Config schema 与实时改配置、
                         # 浏览器半侧的卡片契约与暂存/保存
 ```
 
@@ -229,12 +290,14 @@ node --test test        # 60 项测试：消息文案、配置归一化、事件
 src/plugin.js      插件本体：观察派发流 + 直接监听，决定要不要通知，并跟随界面设置
 src/messages.js    纯函数：会话分类、文案、时长格式化
 src/config.js      配置归一化（任何脏值都回退到默认值，不炸 profile）
-src/settings.js    settings 命名空间：卡片能改哪些选项、默认值、组合层 base
+src/settings.js    这行的 Config schema：进配置表格的 19 个键、哪些是 .volatile()（界面可改的那 14 个）
 src/client.js      浏览器半侧：手写的 lazy-CJS bundle，注册「插件配置」里的卡片
 src/notify.js      Windows Toast 传输层：队列 + powershell 进程生命周期
+cordis.patch.yml   包自带的那一层 bundle patch：插入 windows-notifier 这一行（无 config）
 scripts/toast.ps1  WinRT 弹窗脚本（纯 ASCII，中文通过参数以 UTF-16 传入）
 scripts/send-test-toast.mjs  手动验证通道
-scripts/sync-to-profile.ps1  把仓库同步到 profile 的 node_modules（复制式部署用）
+scripts/sync-to-profile.ps1  打包（npm pack）+ 装进每个 profile 自己的 node_modules 并选中 bundle（默认全部 profile，-Profile 选一个，desktop 跳过）
+examples/cordis.patch.yml    机器级/per-profile 覆盖与禁用的写法示例
 ```
 
 ## English
@@ -252,12 +315,19 @@ A child is recognised from `origin: 'subagent'` in the session header DSH stamps
 the session the *event payload itself* carries (`payload.agent.session`), never from a service
 lookup that a patch-inserted row may have sampled before that service existed.
 
-Its common switches are editable at **Settings → Plugins → Plugin configuration**, which writes to
-`$DSH_HOME/settings.yaml` and applies live — including the notification lifetime (`0` means "stay
-until dismissed") and whether a click opens the Web GUI. That card is the plugin's browser half,
-hand-written in DSH's lazy-CJS client-module format, so this repository still needs no build step.
-Note that a browser half only enters the web boot graph at startup: the client module graph caches
-per-package metadata per resolved specifier, so **restart DSH once** after installing.
+Its live switches are editable on the **Plugins** page, under this row's configuration. There is no
+plugin-registered settings namespace any more: the Host derives a form per mounted profile entry from
+that entry's own `Config` and addresses it by the entry id, so the card registers itself at
+`<package>#<row id>` — here `dsh-windows-notifier#windows-notifier`. A save is one atomic,
+revision-fenced document write into that profile's own `cordis.patch.yml` (not
+`$DSH_HOME/settings.yaml`), with the row's own schema revalidating it; the card's per-field reset
+sends an `unset`, so the field inherits the bundle layer's default again. Only the 14 `.volatile()`
+fields are writable — the 5 install-time ones (`appId`, `powershellPath`, `scriptPath`,
+`maxConcurrent`, `timeoutMs`) are refused by the Host, and the README's Chinese table names them.
+That card is the plugin's browser half, hand-written in DSH's lazy-CJS client-module format, so this
+repository still needs no build step. Note that a browser half only enters the web boot graph at
+startup: the client module graph caches per-package metadata per resolved specifier, so **restart DSH
+once** after installing.
 
 DSH dispatches those events through a *scope carrier*, and Cordis drops listeners whose context
 is outside the carrier's scope chain — a plain root-context listener sees `agent/status` but never
@@ -267,14 +337,62 @@ listeners as a fallback. Both carry the same payload object, so a `WeakSet` de-d
 identity. Toasts go through Windows PowerShell's built-in WinRT `Windows.UI.Notifications` types,
 so nothing has to be installed, and a click opens the Web GUI.
 
-Add the package to a profile and insert one row into the profile's `cordis.patch.yml` (or the
-machine-wide `$DSH_HOME/cordis.patch.yml` to cover every profile):
+Since 0.2.0 the package declares its own bundle patch (`package.json` → `dsh.bundle.patch` →
+`cordis.patch.yml`). That layer contributes the `windows-notifier` row itself, so no `cordis.patch.yml`
+has to be edited by hand any more: the package only has to be **selected**, i.e. its name has to appear
+in that profile's `dsh.profile.bundles`. `dsh plugin … add` normally appends that selection when the
+CLI reconciles installed bundle declarations, but the write was measured to land a moment after the
+command returned — and a dependency that is never selected mounts nothing at all (no row, no
+configuration page) — so the script verifies the selection and writes it itself when it is missing:
+
+```powershell
+powershell -NoProfile -File scripts\sync-to-profile.ps1              # every profile with a package.json
+powershell -NoProfile -File scripts\sync-to-profile.ps1 -Profile web # one profile
+```
+
+That runs `npm pack` and then `dsh plugin --profile <profile> add "file:<tgz>"` per profile, which
+adds the dependency and runs pnpm inside the profile directory, so the package lands in that
+profile's own `node_modules` as a real directory. Two exceptions to "every profile":
+
+- `desktop` is skipped: the launcher refuses every `dsh plugin` invocation for it (`error: profile
+  "desktop" is managed exclusively by the Electron application`, `rejectElectronProfile` in
+  `@deepseek-ai/dsh/lib/bin.js`). Update that profile from the Desktop app's plugin market, which runs
+  the same install plus the selection.
+- A profile whose host is running can refuse the swap outright (pnpm: another program is using this
+  file, os error 32); stop that host, then re-run.
+
+Current DSH (0.1.7-rc.2, Desktop) resolves plugin packages only from the Desktop installation and the
+active profile's own `node_modules`; the shared parent `$DSH_HOME/profiles/node_modules` is treated as
+an obsolete fallback and refused (`dsh-plugin-desktop: cannot resolve package "dsh-windows-notifier"
+from the Desktop installation or active Profile`). A `link:` install is not used: it does not install
+the package's own dependencies, and a link into a checkout resolves to the same real path the module
+cache already holds, so it saves neither the dependency step nor the restart.
+
+Per-profile values (a different log file, an `enabled: false` profile) belong in that profile's own
+`cordis.patch.yml` — the same file the settings card writes to:
 
 ```yaml
-- insert:
-    - id: windows-notifier
-      name: 'dsh-windows-notifier'
+- id: windows-notifier
+  name: 'dsh-windows-notifier'
+  config:
+    logFile: 'D:\dsh\dsh-windows-notifier\.dsh-windows-notifier.log'
 ```
+
+**Do not put the row into the machine-wide `$DSH_HOME/cordis.patch.yml`.** An id-targeted patch
+replaces the whole `config` object (`applyEntryPatches` assigns `target.config = value`), and the
+machine-wide layer is applied after every profile, so it silently shadows whatever the card saved —
+and the Host refuses the save itself with `Configuration for "<id>" is overridden by a home patch or
+command-line overlay`: the page renders, and cannot save.
+
+After editing the source, re-run the script (it removes the package first, because pnpm reports an
+unchanged local tarball as `Already up to date` and does not reinstall it) and **restart DSH**: the
+loader caches an ES module by its resolved path. Uninstall per profile with
+`dsh plugin --profile <profile> remove dsh-windows-notifier` — that also drops the selection, and the
+row goes with the package; the `desktop` profile is uninstalled from the Desktop app's plugin market.
+`dsh` needs `pnpm` on PATH (Desktop ships one); a git-hosted spec such as
+`dsh plugin --profile <profile> add github:ADkun/dsh-windows-notifier` is a legitimate pnpm spec form,
+but it was **not measured here**, and the unmeasured no-pnpm fallback is described in the Chinese
+`没有 pnpm 时` section above.
 
 ## License
 

@@ -1,11 +1,13 @@
 /**
  * Configuration normalization for dsh-windows-notifier.
  *
- * A composed row passes its `config:` block straight through, and this module
- * turns it into a fully-populated option object. The plugin deliberately
- * exports no Cordis `Config` schema, so nothing here rejects unknown keys — a
- * malformed value falls back to its default and is reported through the
- * plugin's own logger instead of failing the profile load.
+ * A composed row passes its `config:` block through, and this module turns it
+ * into a fully-populated option object. The Cordis `Config` schema lives in
+ * `./settings.js` (it is what the profile entry carries), and this module is the
+ * second line of defence: it rejects nothing and validates nothing, so a value
+ * that reached the plugin anyway — an older row, a hand-edited patch — falls
+ * back to its default and is reported through the plugin's own logger instead of
+ * failing the profile load.
  *
  * @module dsh-windows-notifier/config
  */
@@ -23,7 +25,8 @@ export const POWERSHELL_APP_ID =
 
 /** Every option with its default, as one frozen reference object. */
 export const DEFAULT_CONFIG = Object.freeze({
-  /** Master switch; `false` makes `apply` contribute nothing at all. */
+  /** Master switch; checked before every report, so `false` silences the plugin
+   * without unmounting it or taking its listeners down. */
   enabled: true,
   /** Send one "plugin is active" toast as soon as the row activates. */
   notifyOnActivate: false,

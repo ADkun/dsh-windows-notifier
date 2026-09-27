@@ -1,23 +1,28 @@
 /**
- * The settings namespace behind the browser-side configuration card.
+ * The live configuration schema behind the browser-side configuration card.
  *
- * DSH's plugin settings section intersects two ledgers: the namespaces the
- * running Host serves, and the cards registered in the browser under those
- * namespace keys. This module owns the first half — the namespace name, the
- * schemastery schema a card renders, and the composition layer its values
- * inherit from.
+ * DSH 0.1.7 replaced the plugin-registered settings namespace with a form
+ * derived from each profile entry's own `Config`: the Host projects one
+ * descriptor per active entry (`@deepseek-ai/dsh-settings`, `describe()`), the
+ * Plugins page renders it, and only fields declared `.volatile()` can be edited
+ * while the plugin runs. The entry is addressed by its own row id, so this
+ * package no longer owns a namespace and never registers one.
  *
- * The schema deliberately covers only the *live* switches: everything here can
- * be changed while the plugin runs. Process-level knobs (`appId`,
- * `powershellPath`, `scriptPath`, `logFile`, `maxConcurrent`, `timeoutMs`)
- * stay out of the namespace on purpose, so no card can present a value as
- * reload-free when changing it would not be.
+ * Two consequences shape this module:
  *
- * Schemastery is resolved at runtime rather than imported statically: it ships
- * with the harness (`@deepseek-ai/dsh-settings` depends on it), but a checkout
- * of this repository has no `node_modules` at all. A deployment that cannot
- * resolve it loses the configuration card and keeps everything else — the
- * plugin never fails to load over a UI it may not even be able to show.
+ * 1. `Config` must be part of the plugin object the Loader resolves — the
+ *    default export of `src/plugin.js`. It is built once, at module evaluation,
+ *    and schemastery is still resolved at runtime rather than imported
+ *    statically: it ships with the harness, but a checkout of this repository
+ *    has no `node_modules` at all. A deployment that cannot resolve it loses
+ *    the form and keeps everything else — the plugin never fails to load over a
+ *    UI it may not even be able to show.
+ * 2. Only genuinely live switches become volatile fields. `logFile` is one of
+ *    them — the host half re-reads it before every line it writes, so a form may
+ *    edit the debug log's path and have it apply at once. The install-time
+ *    infrastructure knobs (`appId`, `powershellPath`, `scriptPath`,
+ *    `maxConcurrent`, `timeoutMs`) stay ordinary fields, so no form can present
+ *    a value as reload-free when changing it would not be.
  *
  * @module dsh-windows-notifier/settings
  */
@@ -28,24 +33,17 @@ import { DEFAULT_CONFIG } from './config.js'
 
 const localRequire = createRequire(import.meta.url)
 
-/**
- * Settings namespace owned by this plugin.
- *
- * Also the slot key of the configuration card, which is how the settings
- * section pairs a served namespace with the card that edits it.
- */
-export const SETTINGS_NAMESPACE = 'dsh-windows-notifier'
-
 /** The specifier the harness's own schema library resolves to. */
 export const SCHEMA_SPECIFIER = '@deepseek-ai/schemastery'
 
 /**
- * The options the namespace resolves, in card order.
+ * The options a form may edit while the plugin runs, in form order.
  *
- * A resolved namespace section is merged *over* the composition row config, so
- * this list is also exactly what a browser card may override.
+ * Exactly these are declared `.volatile()`: each arrives as a stable reference
+ * the Loader rewrites in place, so a value saved in the Plugins page reaches
+ * the running plugin without a reload.
  */
-export const SETTINGS_OPTIONS = Object.freeze([
+export const LIVE_OPTIONS = Object.freeze([
   'enabled',
   'notifyOnComplete',
   'notifyOnQuestion',
@@ -59,7 +57,41 @@ export const SETTINGS_OPTIONS = Object.freeze([
   'launchUrl',
   'minTaskDurationMs',
   'sound',
+  'logFile',
 ])
+
+/**
+ * The install-time infrastructure knobs, deliberately outside the form.
+ *
+ * They are declared all the same, so the row's `config:` block is fully
+ * described and validated — but as ordinary fields, whose change is applied
+ * only when the plugin is mounted again.
+ */
+export const ORDINARY_OPTIONS = Object.freeze([
+  'appId',
+  'powershellPath',
+  'scriptPath',
+  'maxConcurrent',
+  'timeoutMs',
+])
+
+/** Hint the form shows beside each live option, keyed by option name. */
+const LIVE_DESCRIPTIONS = Object.freeze({
+  enabled: '总开关；关掉后不再有任何通知',
+  notifyOnComplete: '对话完成、可以继续输入时通知',
+  notifyOnQuestion: '智能体向你提问时通知',
+  notifyOnApproval: '操作等待你批准时通知',
+  notifyOnError: '出错时通知',
+  notifyOnInterrupted: '对话被中断时通知',
+  notifyOnActivate: '插件启用时先发一条通知',
+  includeSubagents: '子智能体自己的「结束」也通知（提问/审批/出错始终通知）',
+  disappearAfterMs: '通知停留时长（毫秒）；0 = 一直留到手动关闭',
+  openOnClick: '点击通知时打开 DSH Web 界面',
+  launchUrl: '点击通知打开的地址；留空 = 当前 Web 界面，可用 {sessionId}',
+  minTaskDurationMs: '短于该时长的任务不通知（毫秒）；0 = 不限制',
+  sound: 'default 播放提示音；silent 静音',
+  logFile: '排查日志的路径；留空 = 不写日志文件（改完立刻生效）',
+})
 
 /**
  * Resolve the harness's schema library.
@@ -78,48 +110,70 @@ export function loadSchema() {
 }
 
 /**
- * Build the namespace schema.
+ * Build the row's `Config` schema.
  *
- * Defaults intentionally mirror `DEFAULT_CONFIG`, so a namespace whose
- * composition `base` omits a key still resolves to the plugin's own default.
+ * Defaults intentionally mirror `DEFAULT_CONFIG`, so a row whose `config:` block
+ * omits a key resolves to the plugin's own default.
  *
  * @param {object | undefined} Schema - schemastery, when it resolved.
  * @returns {object | undefined} the schema, or `undefined` without schemastery.
  */
-export function buildSettingsSchema(Schema) {
+export function buildConfigSchema(Schema) {
   if (Schema === undefined) return undefined
+  /** One live field: a default plus the `.volatile()` marker the form reads. */
+  const live = (node, key) =>
+    node.default(DEFAULT_CONFIG[key]).volatile().description(LIVE_DESCRIPTIONS[key])
+  /** One composition-only field: declared and validated, never writable live. */
+  const fixed = (node, key) => node.default(DEFAULT_CONFIG[key])
   return Schema.object({
-    enabled: Schema.boolean().default(DEFAULT_CONFIG.enabled).description('总开关；关掉后不再有任何通知'),
-    notifyOnComplete: Schema.boolean().default(DEFAULT_CONFIG.notifyOnComplete).description('对话完成、可以继续输入时通知'),
-    notifyOnQuestion: Schema.boolean().default(DEFAULT_CONFIG.notifyOnQuestion).description('智能体向你提问时通知'),
-    notifyOnApproval: Schema.boolean().default(DEFAULT_CONFIG.notifyOnApproval).description('操作等待你批准时通知'),
-    notifyOnError: Schema.boolean().default(DEFAULT_CONFIG.notifyOnError).description('出错时通知'),
-    notifyOnInterrupted: Schema.boolean().default(DEFAULT_CONFIG.notifyOnInterrupted).description('对话被中断时通知'),
-    notifyOnActivate: Schema.boolean().default(DEFAULT_CONFIG.notifyOnActivate).description('插件启用时先发一条通知'),
-    includeSubagents: Schema.boolean().default(DEFAULT_CONFIG.includeSubagents).description('子智能体自己的「结束」也通知（提问/审批/出错始终通知）'),
-    disappearAfterMs: Schema.number().default(DEFAULT_CONFIG.disappearAfterMs).description('通知停留时长（毫秒）；0 = 一直留到手动关闭'),
-    openOnClick: Schema.boolean().default(DEFAULT_CONFIG.openOnClick).description('点击通知时打开 DSH Web 界面'),
-    launchUrl: Schema.string().default(DEFAULT_CONFIG.launchUrl).description('点击通知打开的地址；留空 = 当前 Web 界面，可用 {sessionId}'),
-    minTaskDurationMs: Schema.number().default(DEFAULT_CONFIG.minTaskDurationMs).description('短于该时长的任务不通知（毫秒）；0 = 不限制'),
-    sound: Schema.string().default(DEFAULT_CONFIG.sound).description('default 播放提示音；silent 静音'),
+    enabled: live(Schema.boolean(), 'enabled'),
+    notifyOnComplete: live(Schema.boolean(), 'notifyOnComplete'),
+    notifyOnQuestion: live(Schema.boolean(), 'notifyOnQuestion'),
+    notifyOnApproval: live(Schema.boolean(), 'notifyOnApproval'),
+    notifyOnError: live(Schema.boolean(), 'notifyOnError'),
+    notifyOnInterrupted: live(Schema.boolean(), 'notifyOnInterrupted'),
+    notifyOnActivate: live(Schema.boolean(), 'notifyOnActivate'),
+    includeSubagents: live(Schema.boolean(), 'includeSubagents'),
+    disappearAfterMs: live(Schema.number(), 'disappearAfterMs'),
+    openOnClick: live(Schema.boolean(), 'openOnClick'),
+    launchUrl: live(Schema.string(), 'launchUrl'),
+    minTaskDurationMs: live(Schema.number(), 'minTaskDurationMs'),
+    sound: live(Schema.string(), 'sound'),
+    logFile: live(Schema.string(), 'logFile'),
+    appId: fixed(Schema.string(), 'appId'),
+    powershellPath: fixed(Schema.string(), 'powershellPath'),
+    scriptPath: fixed(Schema.string(), 'scriptPath'),
+    maxConcurrent: fixed(Schema.number(), 'maxConcurrent'),
+    timeoutMs: fixed(Schema.number(), 'timeoutMs'),
   })
 }
 
-/** The namespace schema, or `undefined` in an environment without schemastery. */
-export const SETTINGS_SCHEMA = buildSettingsSchema(loadSchema())
+/** The row's schema, or `undefined` in an environment without schemastery. */
+export const Config = buildConfigSchema(loadSchema())
 
 /**
- * The composition-layer `base` for the namespace.
+ * Read one resolved field of a row's Config.
  *
- * Only the namespace's own options travel: the schema would drop anything else
- * anyway, and a base that carried the process-level knobs would invite a card
- * to edit values a reload cannot apply.
+ * A volatile field arrives as the stable reference the Loader rewrites when a
+ * saved value is applied, so `.get()` is where a live value comes from; every
+ * ordinary field is plain data and passes through untouched.
  *
- * @param {Record<string, unknown>} config - the normalized composition config.
- * @returns {Record<string, unknown>} the base section handed to `register`.
+ * @param {unknown} value - one field of the resolved config.
+ * @returns {unknown} the current plain value.
  */
-export function settingsBase(config) {
-  const base = {}
-  for (const key of SETTINGS_OPTIONS) base[key] = config[key]
-  return base
+export function readField(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
+/**
+ * Resolve every field of a row's Config into plain values.
+ *
+ * @param {unknown} config - the resolved config the Loader handed to `apply`.
+ * @returns {Record<string, unknown>} plain values, ready for `normalizeConfig`.
+ */
+export function readConfig(config) {
+  const plain = {}
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return plain
+  for (const [key, value] of Object.entries(config)) plain[key] = readField(value)
+  return plain
 }

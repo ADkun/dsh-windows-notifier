@@ -5,22 +5,24 @@
  * loads client halves through a lazy CommonJS table, so a bundle is only a
  * script that registers one factory with `window.__ModuleLoader__.load`. The
  * factory body runs when the module is first materialized, and everything it
- * `require`s must be a module the web shell already seeds — `react`,
- * `react/jsx-runtime`, `@deepseek-ai/dsh-client-store`,
- * `@deepseek-ai/dsh-client-ui-slots` and the other static UI libraries. A
- * cross-plugin value import is not allowed here; collaboration goes through
- * Cordis services, which is why this card reaches settings through
- * `ctx.settingsScope` rather than by importing another plugin.
+ * `require`s must be a module the web shell already seeds — `react` and
+ * `react/jsx-runtime` here. A cross-plugin value import is not allowed;
+ * collaboration goes through Cordis services, which is why this card reaches
+ * configuration through `ctx.configForms` rather than by importing another
+ * plugin.
  *
- * The card registers into the `settings.plugin.item` slot *keyed by the
- * settings namespace its Host half serves*. That key is the whole contract: the
- * plugins settings section dispatches one card per namespace the Host exposes,
- * so this file never needs to know how the section is laid out, and the section
- * never needs to know what "dsh-windows-notifier" means.
+ * DSH 0.1.7 moved that boundary: the old `settingsScope` service is gone, and a
+ * plugin no longer owns a settings namespace. What exists instead is
+ * `configForms`, which mirrors the Host's own descriptors (one per active
+ * profile entry, addressed by entry id) and hands out one form controller per
+ * entry. This card registers into the Plugins page's `plugins.row.config` slot
+ * under `<package>#<row id>`, and the page supplies it with `{ view, form }`:
+ * `form.state` is the Host's snapshot (`value`, `base`, `user`, `revision`,
+ * `writable`) and `form.mutate(ops, revision)` is the revision-fenced write.
  *
- * The Host owns validation: every save is a revision-fenced document mutation
- * that the Host re-validates against the namespace schema, so this card only
- * stages text, refuses drafts it cannot parse, and reports what the Host says.
+ * The Host owns validation: every save is one atomic document mutation that the
+ * Host re-validates against the row's Config schema, so this card only stages
+ * text, refuses drafts it cannot parse, and reports what the Host says.
  */
 
 window.__ModuleLoader__.load({
@@ -31,17 +33,22 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
-    const clientStore = require('@deepseek-ai/dsh-client-store')
 
     const h = React.createElement
 
-    /** Settings namespace owned by the Host half; also this card's slot key. */
-    const NAMESPACE = 'dsh-windows-notifier'
+    /** The bundle's package name; the row page key is `<package>#<row id>`. */
+    const PACKAGE = 'dsh-windows-notifier'
 
-    /** Injected hook name; the shell exposes it to the card as `useNotifierCard`. */
-    const HOOK = 'notifierCard'
+    /** The row id the bundle patch declares; the form is addressed by it. */
+    const ENTRY_ID = 'windows-notifier'
 
-    const CSS_ID = `${NAMESPACE}/card.css`
+    /** Dictionary namespace owned by this plugin. */
+    const NS = 'dsh-windows-notifier'
+
+    /** The key the Plugins page looks this row's configuration page up by. */
+    const ROW_KEY = `${PACKAGE}#${ENTRY_ID}`
+
+    const CSS_ID = `${PACKAGE}/card.css`
     const CSS = [
       '.dwnCard{display:flex;flex-direction:column;gap:10px;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px 14px;color:var(--dsw-alias-label-primary)}',
       '.dwnHead{display:flex;align-items:flex-start;gap:12px}',
@@ -66,57 +73,125 @@ window.__ModuleLoader__.load({
       '.dwnInputInvalid{border-color:var(--dsw-alias-label-error)}',
       '.dwnHint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
       '.dwnError{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-error)}',
+      '.dwnOk{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
     ].join('')
 
-    if (typeof document !== 'undefined' && document.querySelector(`style[data-plugin-css=${JSON.stringify(CSS_ID)}]`) === null) {
+    /** Append the card's stylesheet, and return the disposer that removes it. */
+    const installStyles = () => {
+      if (typeof document === 'undefined') return () => {}
+      const selector = `style[data-plugin-css=${JSON.stringify(CSS_ID)}]`
+      if (document.querySelector(selector) !== null) return () => {}
       const tag = document.createElement('style')
-      tag.dataset.plugin = NAMESPACE
+      tag.dataset.plugin = PACKAGE
       tag.dataset.pluginCss = CSS_ID
       tag.textContent = CSS
       document.head.appendChild(tag)
+      return () => {
+        tag.remove()
+      }
+    }
+
+    /** The dictionaries the Plugins page renders this card's copy from. */
+    const en = {
+      title: 'Windows notifications',
+      description: 'A native Windows toast whenever a conversation needs you — a turn finished, a question was asked, an approval is waiting, or an error came up.',
+      label_enabled: 'Notifications enabled',
+      hint_enabled: 'Nothing is reported while this is off, and it takes effect without a restart.',
+      label_notifyOnComplete: 'Notify when a conversation is ready for your next message',
+      label_notifyOnQuestion: 'Notify when the agent asks you a question',
+      label_notifyOnApproval: 'Notify when an operation waits for your approval',
+      label_notifyOnError: 'Notify when a step or turn fails',
+      label_notifyOnInterrupted: 'Notify when a turn is interrupted',
+      label_notifyOnActivate: 'Send one notification when the plugin starts',
+      hint_notifyOnActivate: 'Useful for proving the notification channel itself works.',
+      label_includeSubagents: "Also notify for a subagent's own turn end",
+      hint_includeSubagents: 'A subagent that asks you something, waits for approval, or fails is always reported; this switch only covers the "the child finished its turn" family.',
+      label_disappearAfterMs: 'How long a notification stays (ms)',
+      hint_disappearAfterMs: '0 = stay on screen until you dismiss it. Windows offers roughly 5s and 25s banner steps (over 7000 uses the long one); this value decides how long it stays in the Action Center.',
+      label_openOnClick: 'Open the DSH Web GUI when a notification is clicked',
+      label_launchUrl: 'URL a click opens',
+      hint_launchUrl: 'Empty = the running Web GUI; {sessionId} is substituted when present.',
+      label_minTaskDurationMs: 'Ignore turns shorter than this (ms)',
+      hint_minTaskDurationMs: '0 = no limit.',
+      label_sound: 'Silent (no notification sound)',
+      label_logFile: 'Debug log file',
+      hint_logFile: 'One line per decision, including every suppressed notification and why — the way to answer "why did nothing pop up". Empty = write no file.',
+      save: 'Save',
+      saving: 'Saving…',
+      discard: 'Discard',
+      saved: 'Saved; it applies from now on.',
+      saveFailed: 'This profile did not accept the values; they are kept for you to fix.',
+      invalidNumber: 'A number of milliseconds is required here.',
+      overridden: 'Overridden',
+      reset: 'Reset',
+      loading: 'Reading the Host configuration…',
+      unavailable: 'The Host does not expose this configuration to this page.',
+      readOnly: 'This profile does not accept settings writes.',
+    }
+
+    const zh = {
+      title: 'Windows 通知',
+      description: '任何对话需要你时（完成、提问、等待批准、出错），弹一条 Windows 系统通知。',
+      label_enabled: '启用通知',
+      hint_enabled: '关掉后不再有任何通知，也不需要重启。',
+      label_notifyOnComplete: '对话完成、可以继续输入时通知',
+      label_notifyOnQuestion: '智能体向你提问时通知',
+      label_notifyOnApproval: '操作等待你批准时通知',
+      label_notifyOnError: '出错时通知',
+      label_notifyOnInterrupted: '对话被中断时通知',
+      label_notifyOnActivate: '插件启用时先发一条通知',
+      hint_notifyOnActivate: '用来确认通知通道本身是通的。',
+      label_includeSubagents: '子智能体自己的「结束」也通知',
+      hint_includeSubagents: '子智能体向你提问、等你批准、或出错时始终会通知；这里只管子智能体自己一轮跑完的那声「对话已完成」。',
+      label_disappearAfterMs: '通知停留时长（毫秒）',
+      hint_disappearAfterMs: '0 = 一直留在屏幕上，直到你手动关闭。其它值受 Windows 限制：横幅只有约 5 秒 / 25 秒两档（超过 7000 用长档），这个值决定它在通知中心里保留多久。',
+      label_openOnClick: '点击通知时打开 DSH Web 界面',
+      label_launchUrl: '点击打开的地址',
+      hint_launchUrl: '留空 = 自动使用当前 Web 界面的地址；可以用 {sessionId} 占位。',
+      label_minTaskDurationMs: '忽略短于该时长的任务（毫秒）',
+      hint_minTaskDurationMs: '0 = 不限制。',
+      label_sound: '静音（不播放提示音）',
+      label_logFile: '排查日志文件',
+      hint_logFile: '每做一个判断写一行，包括每一次被跳过的通知和原因 —— 「为什么没弹」就靠它回答。留空 = 不写文件。',
+      save: '保存',
+      saving: '保存中…',
+      discard: '放弃修改',
+      saved: '已保存，从现在起生效。',
+      saveFailed: '本部署没有接受这些值，已保留供你修改。',
+      invalidNumber: '这里需要一个数字（毫秒）。',
+      overridden: '已覆盖默认',
+      reset: '恢复默认',
+      loading: '正在读取 Host 配置…',
+      unavailable: 'Host 没有把这个设置暴露给本页面。',
+      readOnly: '这个 profile 不允许写入设置。',
     }
 
     /**
      * The fields this card edits, in the order it renders them.
      *
-     * `kind` is the control, not the schema type: `switch` is a boolean,
-     * `silent` is a checkbox over the `sound` string, and `number`/`text` are
-     * staged as text so an unparseable draft can be shown instead of silently
-     * snapping back to a number.
+     * `kind` is the control, not the schema type: `switch` is a boolean, `mute`
+     * is a checkbox over the `sound` string, and `number`/`text` are staged as
+     * text so an unparseable draft can be shown instead of silently snapping
+     * back to a number. The names are exactly the volatile fields of the Host
+     * half's `Config` (`src/settings.js`), in the same order, because they are
+     * precisely the paths the Host accepts in a write.
      */
     const FIELDS = [
-      { name: 'enabled', kind: 'switch', label: '启用通知', hint: '关掉后不再有任何通知，也不需要重启。' },
-      { name: 'notifyOnComplete', kind: 'switch', label: '对话完成、可以继续输入时通知' },
-      { name: 'notifyOnQuestion', kind: 'switch', label: '智能体向你提问时通知' },
-      { name: 'notifyOnApproval', kind: 'switch', label: '操作等待你批准时通知' },
-      { name: 'notifyOnError', kind: 'switch', label: '出错时通知' },
-      { name: 'notifyOnInterrupted', kind: 'switch', label: '对话被中断时通知' },
-      { name: 'notifyOnActivate', kind: 'switch', label: '插件启用时先发一条通知', hint: '用来确认通知通道本身是通的。' },
-      {
-        name: 'includeSubagents',
-        kind: 'switch',
-        label: '子智能体自己的「结束」也通知',
-        hint: '子智能体向你提问、等你批准、或出错时始终会通知；这里只管子智能体自己一轮跑完的那声「对话已完成」。',
-      },
-      {
-        name: 'disappearAfterMs',
-        kind: 'number',
-        label: '通知停留时长（毫秒）',
-        hint: '0 = 一直留在屏幕上，直到你手动关闭。其它值受 Windows 限制：横幅只有约 5 秒 / 25 秒两档（超过 7000 用长档），这个值决定它在通知中心里保留多久。',
-      },
-      { name: 'openOnClick', kind: 'switch', label: '点击通知时打开 DSH Web 界面' },
-      {
-        name: 'launchUrl',
-        kind: 'text',
-        label: '点击打开的地址',
-        hint: '留空 = 自动使用当前 Web 界面的地址；可以用 {sessionId} 占位。',
-      },
-      { name: 'minTaskDurationMs', kind: 'number', label: '忽略短于该时长的任务（毫秒）', hint: '0 = 不限制。' },
-      { name: 'sound', kind: 'silent', label: '静音（不播放提示音）' },
+      { name: 'enabled', kind: 'switch' },
+      { name: 'notifyOnComplete', kind: 'switch' },
+      { name: 'notifyOnQuestion', kind: 'switch' },
+      { name: 'notifyOnApproval', kind: 'switch' },
+      { name: 'notifyOnError', kind: 'switch' },
+      { name: 'notifyOnInterrupted', kind: 'switch' },
+      { name: 'notifyOnActivate', kind: 'switch' },
+      { name: 'includeSubagents', kind: 'switch' },
+      { name: 'disappearAfterMs', kind: 'number' },
+      { name: 'openOnClick', kind: 'switch' },
+      { name: 'launchUrl', kind: 'text' },
+      { name: 'minTaskDurationMs', kind: 'number' },
+      { name: 'sound', kind: 'mute' },
+      { name: 'logFile', kind: 'text' },
     ]
-
-    const FIELD_BY_NAME = {}
-    for (const field of FIELDS) FIELD_BY_NAME[field.name] = field
 
     /** @returns {boolean} whether `value` is a plain object. */
     const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -124,8 +199,15 @@ window.__ModuleLoader__.load({
     /** Render one resolved value as the text a draft starts from. */
     const formatValue = (value) => (value === undefined || value === null ? '' : String(value))
 
+    /** @returns {boolean} whether the control of `field` is a checkbox. */
+    const isCheckable = (field) => field.kind === 'switch' || field.kind === 'mute'
+
+    /** The checked state a stored value resolves to. */
+    const checkedOf = (field, stored) =>
+      field.kind === 'mute' ? stored === 'silent' : stored === true
+
     /**
-     * Parse one staged draft back into a JSON value.
+     * Parse one staged draft back into the JSON value the Host stores.
      *
      * @param {object} field - one entry of {@link FIELDS}.
      * @param {string} text - the staged text.
@@ -142,169 +224,18 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Build the card's staged form over one bound settings scope.
-     *
-     * Reads come straight from the scope snapshot — the settings mirror is the
-     * only reader of the Host document — while writes are staged here until the
-     * user saves, so what is on screen is always what a save would store.
-     *
-     * @param {object} scope - a `settingsScope.bind({ namespace })` handle.
-     * @returns {{ store: object, actions: object, dispose: () => void }} the card.
-     */
-    const createCard = (scope) => {
-      /** Staged edits by field: `{ op: 'set', text }`, `{ op: 'set', value }`, or `{ op: 'unset' }`. */
-      const drafts = new Map()
-      let saving = false
-      let error = ''
-
-      /** Project the current scope snapshot plus the staged drafts. */
-      const build = () => {
-        const snapshot = scope.getSnapshot()
-        const saved = isObject(snapshot.value) ? snapshot.value : {}
-        const user = isObject(snapshot.user) ? snapshot.user : {}
-        const fields = {}
-        for (const field of FIELDS) {
-          const draft = drafts.get(field.name)
-          const stored = saved[field.name]
-          const entry = {
-            draft: draft !== undefined,
-            overridden: Object.prototype.hasOwnProperty.call(user, field.name),
-            invalid: false,
-          }
-          if (draft !== undefined && draft.op === 'set' && field.kind === 'switch') {
-            entry.checked = draft.value === true
-          } else if (draft !== undefined && draft.op === 'set' && field.kind === 'silent') {
-            entry.checked = draft.value === 'silent'
-          } else if (field.kind === 'switch') {
-            entry.checked = stored === true
-          } else if (field.kind === 'silent') {
-            entry.checked = stored === 'silent'
-          } else {
-            const text = draft !== undefined && draft.op === 'set' ? draft.text : formatValue(stored)
-            entry.text = text
-            entry.invalid = !parseValue(field, text).ok
-          }
-          fields[field.name] = entry
-        }
-        return {
-          status: snapshot.status,
-          writable: snapshot.writable === true && snapshot.mode === 'host',
-          revision: snapshot.revision,
-          saving,
-          error,
-          dirty: drafts.size > 0,
-          fields,
-        }
-      }
-
-      const store = clientStore.createSnapshotStore(build())
-      const refresh = () => {
-        store.set(build())
-      }
-      const unsubscribe = scope.subscribe(refresh)
-
-      const stage = (name, draft) => {
-        drafts.set(name, draft)
-        error = ''
-        refresh()
-      }
-
-      const actions = {
-        /**
-         * Stage one text draft.
-         * @param {string} name - field name.
-         * @param {string} text - the control's value.
-         */
-        edit(name, text) {
-          stage(name, { op: 'set', text })
-        },
-        /**
-         * Stage one boolean draft.
-         * @param {string} name - field name.
-         * @param {boolean} checked - the control's checked state.
-         */
-        toggle(name, checked) {
-          stage(name, { op: 'set', value: checked === true })
-        },
-        /**
-         * Stage one `sound` draft, whose control is a checkbox over a string.
-         * @param {string} name - field name.
-         * @param {boolean} muted - whether the user asked for silence.
-         */
-        setSilent(name, muted) {
-          stage(name, { op: 'set', value: muted === true ? 'silent' : 'default' })
-        },
-        /**
-         * Stage a clear: the field stops being a user override and re-inherits
-         * whatever this row's own config says.
-         * @param {string} name - field name.
-         */
-        resetField(name) {
-          stage(name, { op: 'unset' })
-        },
-        /** Drop every staged draft. */
-        discard() {
-          drafts.clear()
-          error = ''
-          refresh()
-        },
-        /** Commit every staged draft as one atomic, revision-fenced mutation. */
-        async save() {
-          if (saving || store.getSnapshot().writable !== true) return
-          const operations = []
-          let invalid = false
-          for (const [name, draft] of drafts) {
-            if (draft.op === 'unset') {
-              operations.push({ op: 'unset', path: [name] })
-              continue
-            }
-            const field = FIELD_BY_NAME[name]
-            if (field.kind === 'switch' || field.kind === 'silent') {
-              operations.push({ op: 'set', path: [name], value: draft.value })
-              continue
-            }
-            const parsed = parseValue(field, draft.text)
-            if (!parsed.ok) {
-              invalid = true
-              continue
-            }
-            operations.push({ op: 'set', path: [name], value: parsed.value })
-          }
-          if (invalid || operations.length === 0) {
-            error = invalid ? '有字段不是合法数字，先修好再保存。' : error
-            refresh()
-            return
-          }
-          saving = true
-          error = ''
-          refresh()
-          try {
-            await scope.mutate(operations)
-            drafts.clear()
-          } catch (failure) {
-            error = failure instanceof Error ? failure.message : String(failure)
-          } finally {
-            saving = false
-            refresh()
-          }
-        },
-      }
-
-      return { store, actions, dispose: unsubscribe }
-    }
-
-    /**
      * Render one field row.
      *
-     * @param {object} field - one entry of {@link FIELDS}.
-     * @param {object} entry - its projected state.
-     * @param {object} props - the card's injected actions.
+     * @param {object} entry - the field with its projected state.
+     * @param {object} handlers - staging callbacks for this card.
      * @param {boolean} locked - whether every control is disabled.
+     * @param {Function} t - this card's locale reader.
      * @returns {object} the React element.
      */
-    const renderField = (field, entry, props, locked) => {
-      const id = `${NAMESPACE}-${field.name}`
-      const checkable = field.kind === 'switch' || field.kind === 'silent'
+    const renderField = (entry, handlers, locked, t) => {
+      const field = entry.field
+      const id = `${NS}-${field.name}`
+      const checkable = isCheckable(field)
       const control = checkable
         ? h('label', { className: 'dwnCheck', htmlFor: id, key: 'label' },
             h('input', {
@@ -313,25 +244,26 @@ window.__ModuleLoader__.load({
               checked: entry.checked === true,
               disabled: locked,
               onChange: (event) => {
-                if (field.kind === 'silent') props.setSilent(field.name, event.target.checked)
-                else props.toggle(field.name, event.target.checked)
+                handlers.toggle(field.name, event.target.checked)
               },
             }),
-            h('span', { className: 'dwnLabel' }, field.label))
-        : h('label', { className: 'dwnLabel', htmlFor: id, key: 'label' }, field.label)
+            h('span', { className: 'dwnLabel' }, t(`label_${field.name}`)))
+        : h('label', { className: 'dwnLabel', htmlFor: id, key: 'label' }, t(`label_${field.name}`))
 
       const children = [
         h('div', { className: 'dwnRow', key: 'head' },
           control,
-          entry.overridden ? h('span', { className: 'dwnBadge', key: 'badge' }, '已覆盖') : null,
+          entry.overridden ? h('span', { className: 'dwnBadge', key: 'badge' }, t('overridden')) : null,
           entry.overridden
             ? h('button', {
                 key: 'reset',
                 type: 'button',
                 className: 'dwnLink',
                 disabled: locked,
-                onClick: () => props.resetField(field.name),
-              }, '重置')
+                onClick: () => {
+                  handlers.resetField(field.name)
+                },
+              }, t('reset'))
             : null),
       ]
       if (!checkable) {
@@ -344,74 +276,188 @@ window.__ModuleLoader__.load({
           spellCheck: false,
           value: entry.text ?? '',
           disabled: locked,
-          onChange: (event) => props.edit(field.name, event.target.value),
+          onChange: (event) => {
+            handlers.edit(field.name, event.target.value)
+          },
         }))
       }
-      if (field.hint) children.push(h('p', { className: 'dwnHint', key: 'hint' }, field.hint))
-      if (entry.invalid) children.push(h('p', { className: 'dwnError', key: 'invalid' }, '需要一个数字（毫秒）。'))
+      const hint = t(`hint_${field.name}`)
+      if (hint !== `hint_${field.name}`) children.push(h('p', { className: 'dwnHint', key: 'hint' }, hint))
+      if (entry.invalid) children.push(h('p', { className: 'dwnError', key: 'invalid' }, t('invalidNumber')))
       return h('div', { className: 'dwnField', key: field.name }, children)
     }
 
     /**
-     * The configuration card.
+     * The row's configuration page.
      *
-     * It reads its state through the injected `useNotifierCard` hook and writes
-     * through the injected actions, so it holds no state of its own: the card is
-     * a pure projection of the staging store.
+     * It stages edits in its own React state and reads the accepted values from
+     * the snapshot the Plugins page passes in, so what is on screen is always
+     * what a save would store.
      *
-     * @param {object} props - injected hooks and actions.
-     * @returns {object} the React element.
+     * @param {object} props - the view asked for (`page` or `summary`), locale
+     * copy, and the form the page bound to this row (`state` plus `mutate`).
+     * @returns {object | string} the form, or the one-liner.
      */
     function NotifierCard(props) {
-      const state = props.useNotifierCard((snapshot) => snapshot)
-      const locked = !state.writable || state.saving
-      const rows = FIELDS.map((field) => renderField(field, state.fields[field.name], props, locked))
+      const { t, view, form } = props
+      const [drafts, setDrafts] = React.useState({})
+      const [busy, setBusy] = React.useState(false)
+      const [notice, setNotice] = React.useState(null)
+      if (view === 'summary') return t('description')
+
+      const state = form?.state
+      const status = state?.status
+      const writable = state?.writable === true && state?.mode === 'host'
+      const saved = isObject(state?.value) ? state.value : {}
+      const user = isObject(state?.user) ? state.user : {}
+
+      const entries = []
+      let invalid = false
+      let dirty = false
+      for (const field of FIELDS) {
+        const stored = saved[field.name]
+        const staged = Object.prototype.hasOwnProperty.call(drafts, field.name)
+        const entry = { field, overridden: Object.prototype.hasOwnProperty.call(user, field.name), invalid: false }
+        if (isCheckable(field)) {
+          entry.checked = staged ? drafts[field.name] === true : checkedOf(field, stored)
+          entry.changed = entry.checked !== checkedOf(field, stored)
+        } else {
+          entry.text = staged ? drafts[field.name] : formatValue(stored)
+          entry.invalid = !parseValue(field, entry.text).ok
+          entry.changed = entry.text !== formatValue(stored)
+          if (entry.invalid) invalid = true
+        }
+        if (entry.changed) dirty = true
+        entries.push(entry)
+      }
+
+      const locked = !writable || busy
+
+      /** Stage one draft for a text control. */
+      const edit = (name, text) => {
+        setNotice(null)
+        setDrafts((current) => ({ ...current, [name]: text }))
+      }
+
+      /** Stage one draft for a checkbox control. */
+      const toggle = (name, checked) => {
+        setNotice(null)
+        setDrafts((current) => ({ ...current, [name]: checked === true }))
+      }
+
+      /** Commit one field edit and report what the Host decided. */
+      const commit = (operations) => {
+        setBusy(true)
+        setNotice(null)
+        Promise.resolve()
+          .then(() => form.mutate(operations, state.revision))
+          .then((accepted) => {
+            setBusy(false)
+            if (accepted !== true) {
+              setNotice({ kind: 'error', text: t('saveFailed') })
+              return
+            }
+            setDrafts({})
+            setNotice({ kind: 'ok', text: t('saved') })
+          }, (failure) => {
+            setBusy(false)
+            const detail = failure instanceof Error ? failure.message : String(failure)
+            setNotice({ kind: 'error', text: `${t('saveFailed')} ${detail}` })
+          })
+      }
+
+      /** Commit every staged edit as one atomic, revision-fenced mutation. */
+      const save = () => {
+        if (locked || !dirty || invalid) return
+        const operations = []
+        for (const entry of entries) {
+          if (!entry.changed) continue
+          if (entry.field.kind === 'switch') {
+            operations.push({ op: 'set', path: [entry.field.name], value: entry.checked === true })
+            continue
+          }
+          if (entry.field.kind === 'mute') {
+            operations.push({ op: 'set', path: [entry.field.name], value: entry.checked === true ? 'silent' : 'default' })
+            continue
+          }
+          operations.push({ op: 'set', path: [entry.field.name], value: parseValue(entry.field, entry.text).value })
+        }
+        if (operations.length === 0) return
+        commit(operations)
+      }
+
+      /** Drop every staged draft. */
+      const discard = () => {
+        setDrafts({})
+        setNotice(null)
+      }
+
+      /** Drop one field's user override, so it re-inherits the row's config. */
+      const resetField = (name) => {
+        if (locked) return
+        commit([{ op: 'unset', path: [name] }])
+      }
+
+      const handlers = { edit, toggle, resetField }
+      const statusLine = form === undefined || status === 'unavailable'
+        ? h('p', { className: 'dwnHint', key: 'status' }, t('unavailable'))
+        : status === 'loading'
+          ? h('p', { className: 'dwnHint', key: 'status' }, t('loading'))
+          : !writable
+            ? h('p', { className: 'dwnHint', key: 'status' }, t('readOnly'))
+            : null
+      const noticeLine = notice === null
+        ? null
+        : h('p', { className: notice.kind === 'error' ? 'dwnError' : 'dwnOk', key: 'notice' }, notice.text)
+
       return h('div', { className: 'dwnCard' },
         h('div', { className: 'dwnHead' },
           h('div', { key: 'titles' },
-            h('h4', { className: 'dwnTitle' }, 'Windows 通知'),
-            h('p', { className: 'dwnDesc' }, '任何对话需要你时（完成、提问、等待批准、出错），弹一条 Windows 系统通知。')),
+            h('h4', { className: 'dwnTitle' }, t('title')),
+            h('p', { className: 'dwnDesc' }, t('description'))),
           h('div', { className: 'dwnActions', key: 'actions' },
             h('button', {
               type: 'button',
               className: 'dwnButton dwnPrimary',
-              disabled: locked || !state.dirty,
-              onClick: () => {
-                void props.save()
-              },
-            }, state.saving ? '保存中…' : '保存'),
+              disabled: locked || !dirty || invalid,
+              onClick: save,
+            }, busy ? t('saving') : t('save')),
             h('button', {
               type: 'button',
               className: 'dwnButton',
-              disabled: state.saving || !state.dirty,
-              onClick: () => props.discard(),
-            }, '放弃修改'))),
-        state.status === 'unavailable'
-          ? h('p', { className: 'dwnHint' }, 'Host 没有把这个设置暴露给本页面，界面暂时只能看。')
-          : null,
-        state.error ? h('p', { className: 'dwnError' }, state.error) : null,
-        rows)
+              disabled: busy || !dirty,
+              onClick: discard,
+            }, t('discard')))),
+        statusLine,
+        noticeLine,
+        entries.map((entry) => renderField(entry, handlers, locked, t)))
     }
 
-    /** Required client services: the settings transport and the slot registry. */
-    const inject = ['slots', 'settingsScope']
+    /**
+     * Required client services: the slot registry, the locale reader, and the
+     * configuration forms the Plugins page binds to each entry.
+     */
+    const inject = ['slots', 'locale', 'configForms']
 
     /**
-     * Mount the card into the plugins settings section.
+     * Contribute the row's configuration page to the Plugins page.
+     *
+     * The registration is kept alive only while the Host serves this row's
+     * namespace, so a deployment that never enabled the bundle shows no trace
+     * of the card.
      *
      * @param {object} ctx - the browser plugin context.
      */
     function apply(ctx) {
-      const scope = ctx.settingsScope.bind({ namespace: NAMESPACE })
-      const card = createCard(scope)
-      ctx.effect(() => card.dispose, `${NAMESPACE}: card store`)
-      ctx.slots.inject('settings.plugin.item', function* () {
-        yield ctx.slots.register({
-          name: 'settings.plugin.item',
-          key: NAMESPACE,
-          inject: () => ({ hooks: { [HOOK]: card.store }, ...card.actions }),
-        }, NotifierCard)
-      })
+      ctx.effect(installStyles, `${NS}: card styles`)
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), `${NS}: dictionaries`)
+      // The registration names the dictionary namespace, and the slot machinery
+      // hands the component the `t` bound to it — no reader is created here.
+      ctx.effect(() => ctx.configForms.whileServed([ENTRY_ID], () => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
+        name: 'plugins.row.config',
+        key: ROW_KEY,
+        locale: NS,
+      }, NotifierCard))), `${NS}: row configuration page`)
     }
 
     exports.apply = apply

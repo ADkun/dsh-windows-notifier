@@ -1,6 +1,9 @@
 # Dependencies are installed by `dsh plugin --profile <name> add`, never committed.
 node_modules/
 
+# Tarballs produced by scripts/sync-to-profile.ps1 (`npm pack`), never committed.
+dist/
+
 # Debug output produced by the optional `logFile` option.
 *.log
 
