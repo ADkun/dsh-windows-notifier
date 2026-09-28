@@ -137,6 +137,16 @@ dsh plugin --profile web add github:ADkun/dsh-windows-notifier
 powershell -NoProfile -File scripts\sync-to-profile.ps1
 ```
 
+脚本要找一个 **`dsh` 应用程序**（`Get-Command dsh -CommandType Application`）。它在 DSH 会话里通常就在 PATH 上（Desktop 会把 `%APPDATA%\DSH Desktop\host-commands\<profile>\generations\*\bin\dsh.cmd` 放上去），但在**你刚把 DSH 停掉的那个普通 PowerShell 里通常没有** —— 而这恰恰是这个脚本最常见的运行场景。所以：
+
+- 找不到时脚本会把这句话直接打给你（`dsh executable not found (dsh).`），并顺带列出它在 `%APPDATA%\DSH Desktop\host-commands\*\generations\*\bin\` 下发现的 shim；把路径交给 `-Dsh` 就行：
+  ```powershell
+  powershell -NoProfile -File scripts\sync-to-profile.ps1 -Dsh "C:\path\to\dsh.cmd"
+  ```
+- 名字只解析到**函数或别名**时也会被同一句话点出来：脚本要用 `cmd.Path` 调用它，函数没有这个属性（DSH 会话里 `dsh` 有时就是个函数）。
+- `npx` 缓存里的那份（`…\npm-cache\_npx\<hash>\node_modules\.bin\dsh.cmd`）可用，但 `<hash>` 会随缓存刷新而变，**别写进长期命令或脚本文档**。想彻底省掉 `-Dsh`，就在 PATH 上放一份通用的 `dsh`（例如全局安装 `npm i -g @deepseek-ai/dsh`；**未实测**）。
+- 机器上同时装着多个 DSH 时，用哪个 `dsh` 都能对任意 profile 操作 —— `-Dsh` 只是"用哪个 CLI"，profile 由 `--profile`（脚本内部传）决定。
+
 **选中 ≠ 包能解析**：行由 bundle 层带来，包仍必须能从**每个** profile 自己的 `node_modules` 解析到，所以脚本不带参数时默认装进每一个有 `package.json` 的 profile（`desktop` 除外，见第 4 条），并在装完后逐个核对 `dsh.profile.bundles` 里确实有它（只是依赖、没被选中 = 没有行、没有配置页）。以后新建了 profile，要再跑一次脚本。
 
 `pwsh`（PowerShell 7）不是 Windows 自带的；脚本用任意一个都能跑，上面写 `powershell` 是因为它一定在。

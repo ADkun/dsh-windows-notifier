@@ -89,9 +89,13 @@
   DSH user root. Default: $env:DSH_HOME, falling back to $HOME\.dsh.
 
 .PARAMETER Dsh
-  The dsh command. Desktop's shim
+  The dsh command, as an APPLICATION (a function or alias of the same name is
+  not usable: this script invokes it through .Path — see the lookup below).
+  Desktop's shim
   (%APPDATA%\DSH Desktop\host-commands\<profile>\generations\*\bin\dsh.cmd) is
-  usually on PATH inside a DSH session; an npx install has the same name.
+  usually on PATH inside a DSH session; an npx install has the same name. It is
+  usually NOT on PATH in the shell you are left with after stopping DSH — which
+  is exactly when this script runs — so expect to pass the path.
 
 .EXAMPLE
   powershell -NoProfile -File scripts\sync-to-profile.ps1              # every profile
