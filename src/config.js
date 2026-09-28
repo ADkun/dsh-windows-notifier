@@ -38,6 +38,17 @@ export const DEFAULT_CONFIG = Object.freeze({
    * turn" family, whose audience is the parent agent rather than the user.
    */
   includeSubagents: false,
+  /**
+   * Hold a conversation's "turn finished" toast while its delegated children
+   * are still running.
+   *
+   * A dispatcher delegates in the background and ends its own turn at once, so
+   * its first `idle` means "my turn settled", not "the task is over". With this
+   * on, that toast is withheld until the session has no running subagent
+   * descendant — which happens on the last `idle` after the children's
+   * settlement notices have woken the dispatcher back up.
+   */
+  waitForSubagents: true,
   /** A turn ended normally: the conversation is waiting for your next message. */
   notifyOnComplete: true,
   /** The agent asked a structured question (`ask_user_question`). */
@@ -127,6 +138,7 @@ export function normalizeConfig(raw) {
     enabled: readBoolean(input.enabled, DEFAULT_CONFIG.enabled),
     notifyOnActivate: readBoolean(input.notifyOnActivate, DEFAULT_CONFIG.notifyOnActivate),
     includeSubagents: readBoolean(input.includeSubagents, DEFAULT_CONFIG.includeSubagents),
+    waitForSubagents: readBoolean(input.waitForSubagents, DEFAULT_CONFIG.waitForSubagents),
     notifyOnComplete: readBoolean(input.notifyOnComplete, DEFAULT_CONFIG.notifyOnComplete),
     notifyOnQuestion: readBoolean(input.notifyOnQuestion, DEFAULT_CONFIG.notifyOnQuestion),
     notifyOnApproval: readBoolean(input.notifyOnApproval, DEFAULT_CONFIG.notifyOnApproval),

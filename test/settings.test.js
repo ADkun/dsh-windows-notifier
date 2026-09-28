@@ -80,7 +80,7 @@ function createFakeSchema() {
 }
 
 test('the live and ordinary option lists are disjoint and name real options', () => {
-  assert.equal(LIVE_OPTIONS.length, 14)
+  assert.equal(LIVE_OPTIONS.length, 15)
   assert.equal(ORDINARY_OPTIONS.length, 5)
   const all = [...LIVE_OPTIONS, ...ORDINARY_OPTIONS]
   assert.equal(new Set(all).size, all.length, 'no option appears twice')
@@ -156,7 +156,7 @@ test('readConfig flattens a resolved row config into plain values', () => {
   }
 })
 
-test('the real schema resolves 14 volatile fields and 5 plain ones', schemaOnly, () => {
+test('the real schema resolves 15 volatile fields and 5 plain ones', schemaOnly, () => {
   const resolved = Config({ enabled: false, disappearAfterMs: 0 })
   assert.deepEqual(
     Object.keys(resolved).sort(),
@@ -386,7 +386,7 @@ test('the row opts out of the generated page once, through the injected child', 
   assert.equal(typeof probe.ctx.disposers[0], 'function')
   assert.deepEqual(
     probe.ctx.injectRequests,
-    [['settings'], ['sessions'], ['sessionTitle']],
+    [['settings'], ['sessions'], ['sessionTitle'], ['agents']],
     'the settings service is injected, not sampled once (and before the platform guard)',
   )
 })

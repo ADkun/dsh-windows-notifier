@@ -27,6 +27,23 @@
  * be read at all is treated as a user conversation — an unknown session must
  * never lose a notification.
  *
+ * ## Waiting for delegated children
+ *
+ * A child's own turn end is not the only report a *parent* can get wrong. A
+ * dispatcher delegates in the background and ends its own turn immediately, so
+ * its first `idle` announces "my turn settled" — not "the task is over" — while
+ * the delegated work is still running. Reporting that as the conversation's
+ * completion is the same false toast from the other side.
+ *
+ * So the completion report asks a second question first: does this session
+ * still have a running subagent descendant? Two sources answer it — the live
+ * Agent registry (`ctx.agents`, adopted optionally, read exactly the way DSH's
+ * own `runningDescendants` reads it) and the `agent/status` history this plugin
+ * observed — and either may hold the report back. Nothing is *lost* by holding
+ * it: a settled child wakes its dispatcher with a settlement notice, whose next
+ * turn ends with the whole tree quiet, and that is when the toast fires.
+ * `waitForSubagents` turns this off.
+ *
  * ## Why it listens on two channels
  *
  * DSH dispatches those events through a *scope carrier*, and Cordis drops any
@@ -70,6 +87,7 @@ import { appendFileSync } from 'node:fs'
 import { basename } from 'node:path'
 
 import { normalizeConfig } from './config.js'
+import { runningDescendants, toSubagentRecord } from './lineage.js'
 import {
   KIND_APPROVAL,
   KIND_COMPLETE,
@@ -233,17 +251,20 @@ export function apply(ctx, rawConfig) {
     return
   }
 
-  // Both lookups are optional context, and both are adopted through
-  // `ctx.inject` rather than sampled once with `ctx.get`: a row inserted by a
-  // patch layer (this one) can activate before the row that publishes the
-  // service, and a value captured at apply time would then stay `undefined` for
-  // the rest of the process — which is exactly how a live conversation ends up
-  // labelled "会话 a1b2c3d4" instead of by its title.
+  // Every lookup is optional context, and each is adopted through `ctx.inject`
+  // rather than sampled once with `ctx.get`: a row inserted by a patch layer
+  // (this one) can activate before the row that publishes the service, and a
+  // value captured at apply time would then stay `undefined` for the rest of
+  // the process — which is exactly how a live conversation ends up labelled
+  // "会话 a1b2c3d4" instead of by its title, and how a subagent gate would
+  // silently never fire.
   let sessions = ctx.get('sessions')
   let sessionTitle = ctx.get('sessionTitle')
+  let agents = ctx.get('agents')
   for (const [serviceName, adopt] of [
     ['sessions', (value) => { sessions = value }],
     ['sessionTitle', (value) => { sessionTitle = value }],
+    ['agents', (value) => { agents = value }],
   ]) {
     ctx.inject([serviceName], (serviceCtx) => {
       const value = serviceCtx[serviceName]
@@ -273,6 +294,18 @@ export function apply(ctx, rawConfig) {
 
   /** Child sessions learned from their own creation announcement, by identity. */
   const subagentSessions = new Set()
+
+  /**
+   * Delegated children whose liveness was observed, by identity.
+   *
+   * The fallback for a runtime where the Agent registry is not reachable, or
+   * where it does not publish a delegated child to this row's scope: a child
+   * seen `running` and never seen `idle` still holds its dispatcher's task
+   * open. Bounded like `subagentSessions`, for the same reason — and released
+   * on `agent/disposed`, so a child that dies mid-turn cannot silence its
+   * parent forever.
+   */
+  const subagentRuns = new Map()
 
   /** Payload objects already reported, shared by both observation channels. */
   const reported = new WeakSet()
@@ -372,6 +405,89 @@ export function apply(ctx, rawConfig) {
     }
   }
 
+  /**
+   * Remember one child's own liveness and lineage, as its status change
+   * reports them.
+   *
+   * Runs for every `agent/status` occurrence, before any switch is consulted,
+   * so the fallback memory is warm even when notifications were off while the
+   * child started.
+   *
+   * @param {unknown} agent - the payload's agent subject.
+   * @param {unknown} sessionId - the identity the payload carries.
+   * @param {unknown} status - the announced status.
+   */
+  const rememberRun = (agent, sessionId, status) => {
+    if (status !== 'running' && status !== 'idle') return
+    try {
+      const id = String(sessionId)
+      const record = toSubagentRecord(readAgentSession(agent)?.header, sessionId, status === 'running')
+      if (record === undefined) {
+        // A payload carrying no readable session still settles the child it
+        // names, which is what keeps an id-only `idle` from looking forever.
+        const known = subagentRuns.get(id)
+        if (known !== undefined) known.running = status === 'running'
+        return
+      }
+      subagentRuns.delete(record.id)
+      subagentRuns.set(record.id, record)
+      while (subagentRuns.size > SUBAGENT_MEMORY_LIMIT) {
+        subagentRuns.delete(subagentRuns.keys().next().value)
+      }
+    } catch (error) {
+      log(`agent/status lineage handler failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * Every delegated child the live Agent registry publishes right now.
+   *
+   * @returns {import('./lineage.js').SubagentRecord[]} the records, or `[]`
+   *   when there is no registry to ask.
+   */
+  const liveSubagentRecords = () => {
+    const records = []
+    if (agents === undefined) return records
+    let list
+    try {
+      list = agents.list()
+    } catch {
+      return records
+    }
+    if (!Array.isArray(list)) return records
+    for (const live of list) {
+      try {
+        const record = toSubagentRecord(live?.session?.header, live?.id, live?.status === 'running')
+        if (record !== undefined) records.push(record)
+      } catch {
+        // One unreadable agent must not stop the scan for all the others.
+      }
+    }
+    return records
+  }
+
+  /**
+   * The delegated children still running below one conversation.
+   *
+   * Both sources are consulted and neither can veto the other: the registry is
+   * authoritative about the agents it publishes, while the observed history
+   * covers a delegated child the registry never showed this row's scope. The
+   * only way either errs is by holding a report back, and the next settlement
+   * of that child releases it.
+   *
+   * @param {unknown} sessionId - the conversation about to report its turn end.
+   * @returns {{ ids: string[], source: string }} the running child ids, and
+   *   which source was primarily able to answer.
+   */
+  const runningChildrenBelow = (sessionId) => {
+    const live = liveSubagentRecords()
+    const observed = [...subagentRuns.values()]
+    return {
+      ids: runningDescendants([...observed, ...live], sessionId),
+      source: live.length > 0 ? 'ctx.agents' : 'agent/status events',
+    }
+  }
+
   /** The best available human label for one conversation. */
   const resolveSessionTitle = (session) => {
     if (session === undefined || session === null) return ''
@@ -454,10 +570,13 @@ export function apply(ctx, rawConfig) {
 
   /** Report one settled turn, once the log confirms what settled it. */
   const reportStatus = (payload) => {
-    if (!isEnabled()) return
     const agent = payload?.agent
     const sessionId = agent?.id
     if (sessionId === undefined || sessionId === null) return
+    // Lineage is remembered before any switch is consulted: the gate below asks
+    // about children that started while notifications happened to be off.
+    rememberRun(agent, sessionId, payload?.status)
+    if (!isEnabled()) return
     try {
       if (payload.status === 'running') {
         runningSince.set(sessionId, Date.now())
@@ -492,6 +611,19 @@ export function apply(ctx, rawConfig) {
       if (!interrupted && options.minTaskDurationMs > 0 && startedAt !== undefined) {
         if (Date.now() - startedAt < options.minTaskDurationMs) {
           log(`skip complete for ${String(sessionId)}: shorter than minTaskDurationMs`)
+          return
+        }
+      }
+      // A dispatcher ends its own turn the moment it has delegated, so this
+      // `idle` is the *task's* end only once nothing delegated is still
+      // running. The withheld toast is not lost: each settled child wakes its
+      // dispatcher with a settlement notice, and the last idle of the tree is
+      // reported. An interruption is exempt — that toast describes the turn
+      // being stopped, which is true whatever the children are doing.
+      if (!interrupted && options.waitForSubagents) {
+        const below = runningChildrenBelow(sessionId)
+        if (below.ids.length > 0) {
+          log(`skip complete for ${String(sessionId)}: ${String(below.ids.length)} delegated subagent(s) still running (${below.source})`)
           return
         }
       }
@@ -548,7 +680,10 @@ export function apply(ctx, rawConfig) {
   /** Forget a conversation that no longer exists. */
   const forgetAgent = (payload) => {
     const sessionId = payload?.agent?.id
-    if (sessionId !== undefined && sessionId !== null) runningSince.delete(sessionId)
+    if (sessionId === undefined || sessionId === null) return
+    runningSince.delete(sessionId)
+    // A disposed child can no longer hold its dispatcher's task open.
+    subagentRuns.delete(String(sessionId))
   }
 
   /**
@@ -625,10 +760,11 @@ export function apply(ctx, rawConfig) {
   ctx.effect(() => () => {
     detach()
     runningSince.clear()
+    subagentRuns.clear()
     notifier.dispose()
   }, `${name}: toast transport`)
 
-  log(`active (appId=${options.appId}, includeSubagents=${String(options.includeSubagents)}, disappearAfterMs=${String(options.disappearAfterMs)}, openOnClick=${String(options.openOnClick)})`)
+  log(`active (appId=${options.appId}, includeSubagents=${String(options.includeSubagents)}, waitForSubagents=${String(options.waitForSubagents)}, disappearAfterMs=${String(options.disappearAfterMs)}, openOnClick=${String(options.openOnClick)})`)
   if (options.notifyOnActivate) {
     notifier.send('🔔 dsh-windows-notifier 已启用', ['从现在起，任何对话需要你时都会弹出通知。'], resolveLaunchUrl(undefined))
   }

@@ -27,12 +27,53 @@ function readLog(path) {
 }
 
 /** A live-session stand-in exposing only what the plugin actually reads. */
-function fakeSession({ id, origin, events }) {
+function fakeSession({ id, origin, parentSession, events }) {
   return {
     seq: events.length,
-    header: { id, origin, cwd: 'D:\\work\\demo' },
+    header: {
+      id,
+      origin,
+      cwd: 'D:\\work\\demo',
+      ...(parentSession === undefined ? {} : { parentSession }),
+    },
     eventAt: (seq) => events[seq],
   }
+}
+
+/** A top-level conversation whose last turn ended normally. */
+function settledSession(id) {
+  return fakeSession({
+    id,
+    events: [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    ],
+  })
+}
+
+/** A live delegated child of `parentSession`, as DSH's subagent seam stamps it. */
+function delegatedChild({ id, parentSession, settle = true }) {
+  return fakeSession({
+    id,
+    origin: 'subagent',
+    parentSession,
+    events: settle
+      ? [
+          { type: 'turn/start', data: { turn: 1 } },
+          { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+        ]
+      : [],
+  })
+}
+
+/** The live Agent registry as the plugin reads it: `list()` over live agents. */
+function fakeAgentRegistry(...agents) {
+  return { list: () => agents }
+}
+
+/** One live agent as the registry publishes it. */
+function liveAgent(session, status) {
+  return { id: session.header.id, status, session }
 }
 
 /**
@@ -437,4 +478,170 @@ test('openOnClick false makes the toast inert even with a URL configured', windo
   const opened = mount(t, { session }, { openOnClick: true, launchUrl: 'http://example.test/{sessionId}' })
   fire(opened.ctx, ...idle(session.header.id))
   assert.match(opened.log(), /-> http:\/\/example\.test\/session-44445555-6666/)
+})
+
+test('a dispatcher that delegated does not report completion while its child runs', windowsOnly, (t) => {
+  // The reported failure: a background delegation ends the dispatcher's own
+  // turn immediately, so its `idle` interrupts the user with "对话已完成"
+  // while the delegated work is still running.
+  const dispatcher = settledSession('session-aaaa2222-1111')
+  const child = delegatedChild({ id: 'session-child-0001', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher })
+
+  fire(ctx, 'agent/status', agentPayload(child, { status: 'running' }))
+  fire(ctx, ...running(dispatcher.header.id))
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /skip complete for session-aaaa2222-1111: 1 delegated subagent\(s\) still running/)
+  assert.doesNotMatch(log(), /notify complete/)
+
+  // The child settles and its settlement notice wakes the dispatcher; the
+  // dispatcher's own next turn ends with the whole tree quiet, which is the
+  // moment the withheld toast actually belongs to.
+  fire(ctx, 'agent/status', agentPayload(child, { status: 'idle' }))
+  fire(ctx, ...running(dispatcher.header.id))
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /notify complete: ✅ 对话已完成 \/ 重构支付模块/)
+})
+
+test('the live Agent registry can hold the completion back on its own', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-bbbb2222-1111')
+  const child = delegatedChild({ id: 'session-child-0002', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher }, {}, {
+    agents: fakeAgentRegistry(liveAgent(child, 'running')),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /skip complete for .*: 1 delegated subagent\(s\) still running \(ctx\.agents\)/)
+  assert.doesNotMatch(log(), /notify complete/)
+})
+
+test('a registry that reports the child settled releases the completion', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-cccc2222-1111')
+  const child = delegatedChild({ id: 'session-child-0003', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher }, {}, {
+    agents: fakeAgentRegistry(liveAgent(child, 'running')),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+  assert.doesNotMatch(log(), /notify complete/)
+
+  // An idle child is still resident, and still not holding anyone back.
+  const released = mount(t, { session: dispatcher }, {}, {
+    agents: fakeAgentRegistry(liveAgent(child, 'idle')),
+  })
+  fire(released.ctx, ...idle(dispatcher.header.id))
+  assert.match(released.log(), /notify complete/)
+})
+
+test('a chain of grandchildren holds the root back too', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-dddd2222-1111')
+  const child = liveAgent(delegatedChild({ id: 'session-child-0004', parentSession: dispatcher.header.id }), 'idle')
+  const grandchild = liveAgent(
+    delegatedChild({ id: 'session-grandchild-0001', parentSession: 'session-child-0004', settle: false }),
+    'running',
+  )
+  const { ctx, log } = mount(t, { session: dispatcher }, {}, {
+    agents: fakeAgentRegistry(child, grandchild),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /1 delegated subagent\(s\) still running/)
+  assert.doesNotMatch(log(), /notify complete/)
+})
+
+test('another conversation running its own subagent does not hold this one back', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-eeee2222-1111')
+  const other = liveAgent(
+    delegatedChild({ id: 'session-child-0005', parentSession: 'session-someone-else' }),
+    'running',
+  )
+  const { ctx, log } = mount(t, { session: dispatcher }, {}, {
+    agents: fakeAgentRegistry(other),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /notify complete/)
+})
+
+test('an independent fork never holds its source back', windowsOnly, (t) => {
+  // A fork shares `parentSession` without the subagent origin, and is a
+  // conversation in its own right — it must not suppress its source's toast.
+  const dispatcher = settledSession('session-ffff2222-1111')
+  const fork = liveAgent(
+    fakeSession({ id: 'session-fork-0001', parentSession: dispatcher.header.id, events: [] }),
+    'running',
+  )
+  const { ctx, log } = mount(t, { session: dispatcher }, {}, {
+    agents: fakeAgentRegistry(fork),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /notify complete/)
+})
+
+test('waitForSubagents false reports the dispatcher immediately', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-11113333-1111')
+  const child = delegatedChild({ id: 'session-child-0006', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher }, { waitForSubagents: false }, {
+    agents: fakeAgentRegistry(liveAgent(child, 'running')),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.doesNotMatch(log(), /still running/)
+  assert.match(log(), /notify complete/)
+})
+
+test('an interrupted turn is reported even with delegated children running', windowsOnly, (t) => {
+  // The interruption describes this turn being stopped, which is true whatever
+  // the children are doing — holding it back would lose the report entirely.
+  const dispatcher = fakeSession({
+    id: 'session-22224444-1111',
+    events: [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } },
+    ],
+  })
+  const child = delegatedChild({ id: 'session-child-0007', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher }, { notifyOnInterrupted: true }, {
+    agents: fakeAgentRegistry(liveAgent(child, 'running')),
+  })
+
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /notify interrupted/)
+})
+
+test('a disposed child stops holding its dispatcher back', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-33335555-1111')
+  const child = delegatedChild({ id: 'session-child-0008', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher })
+
+  fire(ctx, 'agent/status', agentPayload(child, { status: 'running' }))
+  fire(ctx, ...idle(dispatcher.header.id))
+  assert.doesNotMatch(log(), /notify complete/)
+
+  // A child that dies mid-turn reports its disposal, which is the release.
+  fire(ctx, 'agent/disposed', { agent: { id: child.header.id } })
+  fire(ctx, ...idle(dispatcher.header.id))
+  assert.match(log(), /notify complete/)
+})
+
+test('an id-only idle settles the child the history remembered', windowsOnly, (t) => {
+  const dispatcher = settledSession('session-44446666-1111')
+  const child = delegatedChild({ id: 'session-child-0009', parentSession: dispatcher.header.id })
+  const { ctx, log } = mount(t, { session: dispatcher })
+
+  fire(ctx, 'agent/status', agentPayload(child, { status: 'running' }))
+  // The settling event carries no readable session anywhere, only the identity.
+  fire(ctx, ...idle(child.header.id))
+  fire(ctx, ...idle(dispatcher.header.id))
+
+  assert.match(log(), /notify complete/)
 })

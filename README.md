@@ -16,6 +16,8 @@
 
 通知正文第一行是**对话标题**（取自 DSH 的会话标题，还没生成标题时回退到工作目录名），第二行是状态说明或具体内容（提问内容、工具名、错误信息、运行时长）。
 
+**后台委派的调度方不会误报「已完成」。** Adg 这类多智能体模式里，调度代理一派出子代理就立刻结束自己这一轮 —— 于是那声「对话已完成」会在子代理还在跑的时候到达。`waitForSubagents`（默认开）让它先看一眼：该会话名下还有没有在跑的子代理（`origin: 'subagent'` 的子孙，任意深度；fork 不算，它不是委派）。只要还有，通知就先按下去，日志写 `skip complete for <会话>: N delegated subagent(s) still running`。子代理结算会唤醒调度方，等它真正跑完最后一轮、名下再没有在跑的子代理时，那条通知才补上 —— 没丢通知，只是延后到任务真的收尾。被中止（`⏹️ 本轮已中止`）不受这条闸门影响：它说的是这一轮被停了，什么时候都成立。
+
 默认**不通知** subagent / workflow 子会话自己一轮跑完的那声「对话已完成」—— 一次后台委派会派生好几个子会话，全部通知会变成弹窗轰炸。**但子会话需要人**的时候照常通知：它向你提问、等你批准、或者出错，都会弹。需要连子会话的「结束」也听，把 `includeSubagents` 打开。
 
 ## 工作原理
@@ -194,6 +196,7 @@ powershell -NoProfile -File scripts\sync-to-profile.ps1
 | `enabled` | boolean | `true` | 总开关；`false` 时插件不做任何事 |
 | `notifyOnActivate` | boolean | `false` | 激活时先弹一条「已启用」，用来确认通道正常 |
 | `includeSubagents` | boolean | `false` | 是否也通知 subagent / workflow 子会话**自己一轮结束**；子会话的提问 / 审批 / 出错始终通知 |
+| `waitForSubagents` | boolean | `true` | 会话名下还有子代理在跑时先不弹「对话已完成」，等它真正收尾再弹（挡住调度方一派出子代理就误报完成） |
 | `notifyOnComplete` | boolean | `true` | 任务完成（`idle`）时通知 |
 | `notifyOnQuestion` | boolean | `true` | 智能体提问时通知 |
 | `notifyOnApproval` | boolean | `true` | 等待批准时通知 |
@@ -213,15 +216,15 @@ powershell -NoProfile -File scripts\sync-to-profile.ps1
 
 > **「停留时长」能做的事，受 Windows 自己限制。** 横幅时长只有「约 5 秒 / 约 25 秒」两档，插件只能按 `disappearAfterMs` 选最近的一档（> 7000 用长档）；这个值同时通过 `ExpirationTime` 决定它**在通知中心里保留多久**，所以写 3000 并不会让横幅 3 秒就走。要让通知「无限等待」，用 `0`：插件会带上 `scenario="reminder"`，通知就一直留在屏幕上直到你手动关闭——这是 Windows 上唯一能做到这件事的方式。
 
-**哪些键能在界面里改：** 上表 19 个键里只有 14 个是「运行时真的会重读」的，也就是**可以在 设置 → 插件 → 本插件那一行的配置 里改**：`enabled`、`notifyOnComplete`、`notifyOnQuestion`、`notifyOnApproval`、`notifyOnError`、`notifyOnInterrupted`、`notifyOnActivate`、`includeSubagents`、`minTaskDurationMs`、`sound`、`disappearAfterMs`、`openOnClick`、`launchUrl`、`logFile`。剩下 5 个是安装期的固定设施（`appId`、`powershellPath`、`scriptPath`、`maxConcurrent`、`timeoutMs`），只能在 patch 里写 —— Host 会拒绝界面对它们的写入。分界线就在 `src/settings.js`：标了 `.volatile()` 的是前者。
+**哪些键能在界面里改：** 上表 20 个键里只有 15 个是「运行时真的会重读」的，也就是**可以在 设置 → 插件 → 本插件那一行的配置 里改**：`enabled`、`notifyOnComplete`、`notifyOnQuestion`、`notifyOnApproval`、`notifyOnError`、`notifyOnInterrupted`、`notifyOnActivate`、`includeSubagents`、`waitForSubagents`、`minTaskDurationMs`、`sound`、`disappearAfterMs`、`openOnClick`、`launchUrl`、`logFile`。剩下 5 个是安装期的固定设施（`appId`、`powershellPath`、`scriptPath`、`maxConcurrent`、`timeoutMs`），只能在 patch 里写 —— Host 会拒绝界面对它们的写入。分界线就在 `src/settings.js`：标了 `.volatile()` 的是前者。
 
 ## 界面化配置
 
-Web 界面的 **设置 → 插件** 里，本插件那一行会带一个配置页（卡片上是上面那 14 个可热改的键）。这套模型是 DSH 0.1.7 之后的样子，和旧版完全不同：
+Web 界面的 **设置 → 插件** 里，本插件那一行会带一个配置页（卡片上是上面那 15 个可热改的键）。这套模型是 DSH 0.1.7 之后的样子，和旧版完全不同：
 
 - **没有"插件注册的 settings 命名空间"这回事了。** Host 给每个已挂载的 profile 条目生成一份配置描述（`@deepseek-ai/dsh-settings` 的 `describe()`，地址就是**条目自己的 id**），浏览器侧的 `configForms` 服务把它镜像出来，卡片按 `<包名>#<行 id>` —— 这里是 `dsh-windows-notifier#windows-notifier` —— 注册到那一行上。id 变了，卡片就找不到行。
 - **保存写的是该 profile 自己的 patch 文件**（`$DSH_HOME\profiles\<profile>\cordis.patch.yml`），不再是 `$DSH_HOME/settings.yaml`。一次保存 = 一次原子的、带 revision 栅栏的文档改动，Host 用行自己的 schema 重新校验；卡片上的「恢复默认」发一条 `unset`，让该字段重新继承 bundle 层的默认值。
-- **只允许写 `.volatile()` 字段**：`src/settings.js` 里标了 `.volatile()` 的 14 个就是全部可写路径，写别的 Host 直接拒。字段被机器级 patch 或命令行 overlay 盖住时也会拒，原文 `Configuration for "<id>" is overridden by a home patch or command-line overlay`。
+- **只允许写 `.volatile()` 字段**：`src/settings.js` 里标了 `.volatile()` 的 15 个就是全部可写路径，写别的 Host 直接拒。字段被机器级 patch 或命令行 overlay 盖住时也会拒，原文 `Configuration for "<id>" is overridden by a home patch or command-line overlay`。
 - **保存后立刻生效，不用重启。** 卡片改的是 `.volatile()` 引用，loader 就地改写它，宿主半侧每次做判断前都重读一遍 —— 包括总开关：关掉后不再有任何通知，但监听不摘，`enabled` 重新打开就立刻恢复（不再有"摘了挂不回来"的问题）。
 - 卡片是插件的**浏览器半侧**（`src/client.js`），按 DSH 的 lazy-CJS 客户端模块格式手写，所以仓库仍然零构建；界面文案走 Client 的 locale 服务（`zh` / `en` 两本词典）。
 - 行自己的 schema 需要 `@deepseek-ai/schemastery`（harness 自带）。环境里没有它时插件照常工作，只是**没有配置表格**（也就没有卡片）。
@@ -247,6 +250,8 @@ node scripts/send-test-toast.mjs "自定义标题" "自定义正文"
 ```
 notify complete: ✅ 对话已完成 / 重构支付模块 | 已运行 2 分 13 秒，可以继续对话了。 -> http://127.0.0.1:3080
 skip complete for cccc1111-child-0001: subagent turn end (includeSubagents is off)
+skip complete for session-…: 2 delegated subagent(s) still running
+skip complete for session-…: 1 delegated subagent(s) still running (ctx.agents)
 skip complete for session-…: attached session has no settled turn
 session … is not attached; reporting completion without a turn outcome
 skip question: switch off
@@ -307,7 +312,12 @@ examples/cordis.patch.yml    机器级/per-profile 覆盖与禁用的写法示�
 question, an approval is pending, or a step errored. A subagent or workflow child's *own* turn end
 is filtered out by default (set `includeSubagents: true` to hear it too); a child that asks a
 question, blocks on approval, or errors is still reported, because the user is the one who has to
-answer it. It depends on nothing you have to install: the Windows side is Windows
+answer it. A *dispatcher* is handled separately: in a multi-agent mode such as Adg, delegating ends
+the dispatcher's own turn at once, so its first `idle` is not the task being over. `waitForSubagents`
+(on by default) holds that toast back while the session still has a running `origin: 'subagent'`
+descendant — at any depth; a fork is not a delegation and never holds anything back — and releases it
+on the last idle after the children reported back, because a settling child wakes its parent. The
+interrupted report is never held back: this turn being stopped is true whatever the children do. It depends on nothing you have to install: the Windows side is Windows
 PowerShell's built-in WinRT `Windows.UI.Notifications`, and the settings schema comes from the
 harness's own `@deepseek-ai/schemastery`.
 
@@ -321,7 +331,7 @@ that entry's own `Config` and addresses it by the entry id, so the card register
 `<package>#<row id>` — here `dsh-windows-notifier#windows-notifier`. A save is one atomic,
 revision-fenced document write into that profile's own `cordis.patch.yml` (not
 `$DSH_HOME/settings.yaml`), with the row's own schema revalidating it; the card's per-field reset
-sends an `unset`, so the field inherits the bundle layer's default again. Only the 14 `.volatile()`
+sends an `unset`, so the field inherits the bundle layer's default again. Only the 15 `.volatile()`
 fields are writable — the 5 install-time ones (`appId`, `powershellPath`, `scriptPath`,
 `maxConcurrent`, `timeoutMs`) are refused by the Host, and the README's Chinese table names them.
 That card is the plugin's browser half, hand-written in DSH's lazy-CJS client-module format, so this

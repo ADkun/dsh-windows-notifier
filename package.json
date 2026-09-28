@@ -1,6 +1,6 @@
 {
   "name": "dsh-windows-notifier",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH plugin: send a native Windows toast notification whenever any DSH conversation needs you — a task finished, a question was asked, or an approval is waiting.",
   "keywords": [
     "dsh",

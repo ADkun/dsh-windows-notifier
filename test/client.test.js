@@ -288,6 +288,7 @@ const RESOLVED = {
   notifyOnInterrupted: false,
   notifyOnActivate: false,
   includeSubagents: false,
+  waitForSubagents: true,
   disappearAfterMs: 6000,
   openOnClick: true,
   launchUrl: '',
@@ -396,8 +397,8 @@ test('a rendered card shows every live field in schema order', async () => {
   assert.ok(collected.text.includes('通知停留时长（毫秒）'))
   assert.ok(collected.text.includes('排查日志文件'))
   assert.ok(collected.text.includes('点击通知时打开 DSH Web 界面'))
-  // 9 switches plus the sound checkbox, and the four text/number inputs.
-  assert.equal(collected.inputs.filter((props) => props.type === 'checkbox').length, 10)
+  // 10 switches plus the sound checkbox, and the four text/number inputs.
+  assert.equal(collected.inputs.filter((props) => props.type === 'checkbox').length, 11)
   assert.equal(collected.inputs.filter((props) => props.type === 'text').length, 4)
   // The card edits exactly the Host's volatile fields, in the same order.
   assert.deepEqual(
