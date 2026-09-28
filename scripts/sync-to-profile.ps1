@@ -127,9 +127,31 @@ $root = [System.IO.Path]::GetFullPath($root)
 # shadowed by a function of the same name (Get-Command returns Function with an
 # empty .Source), and `& $cmd.Source …` then fails with "The expression after '&'
 # in a pipeline element produced an object that was not valid".
-$dshCmd = @(Get-Command $Dsh -CommandType Application -ErrorAction SilentlyContinue)[0]
+# The candidate list is tested for emptiness before it is indexed, instead of the
+# idiomatic `@(...)[0]`: under `Set-StrictMode -Version Latest` an out-of-range
+# index is an ERROR rather than $null, so "dsh is not on PATH" surfaced as
+# IndexOutOfRangeException and the message below never printed (measured
+# 2026-09-28, Windows PowerShell 5.1, from a shell outside any DSH session).
+$dshCandidates = @(Get-Command $Dsh -CommandType Application -ErrorAction SilentlyContinue)
+$dshCmd = $null
+if ($dshCandidates.Count -gt 0) { $dshCmd = $dshCandidates[0] }
 if (-not $dshCmd) {
-  throw "dsh executable not found ($Dsh). Desktop's shim lives at %APPDATA%\DSH Desktop\host-commands\<profile>\generations\*\bin\dsh.cmd (usually on PATH inside a DSH session); otherwise pass -Dsh <path to dsh.cmd>."
+  $reason = "dsh executable not found ($Dsh)."
+  $shadow = @(Get-Command $Dsh -ErrorAction SilentlyContinue)
+  if ($shadow.Count -gt 0) {
+    $reason += ' The name resolves to a ' + $shadow[0].CommandType + ' named ' + $Dsh +
+        ', which cannot be invoked as an application.'
+  }
+  $reason += ' Desktop''s shim lives at %APPDATA%\DSH Desktop\host-commands\<profile>' +
+      '\generations\*\bin\dsh.cmd (usually on PATH inside a DSH session);' +
+      ' otherwise pass -Dsh <path to dsh.cmd>.'
+  $shims = @(Get-ChildItem -Path (Join-Path $env:APPDATA 'DSH Desktop\host-commands\*\generations\*\bin\dsh.cmd') -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending)
+  if ($shims.Count -gt 0) {
+    $reason += ' One is installed at ' + $shims[0].FullName +
+        ' (pass it with -Dsh; a standalone CLI from the same DSH install works just as well).'
+  }
+  throw $reason
 }
 
 # Pack. The tarball's contents come from package.json's `files` field — the same
