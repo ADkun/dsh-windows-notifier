@@ -1,0 +1,70 @@
+{
+  "name": "dsh-windows-notifier",
+  "version": "0.4.0",
+  "description": "DSH plugin: send a native Windows toast notification whenever any DSH conversation needs you — a task finished, a question was asked, or an approval is waiting.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "cordis-plugin",
+    "windows",
+    "toast",
+    "notification"
+  ],
+  "type": "module",
+  "main": "src/plugin.js",
+  "exports": {
+    ".": "./src/plugin.js",
+    "./client": "./src/client.js",
+    "./messages": "./src/messages.js",
+    "./config": "./src/config.js",
+    "./settings": "./src/settings.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "3.x"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "files": [
+    "src",
+    "scripts",
+    "examples",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADkun/dsh-windows-notifier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ADkun/dsh-windows-notifier/issues"
+  },
+  "homepage": "https://github.com/ADkun/dsh-windows-notifier#readme",
+  "scripts": {
+    "test": "node --test test",
+    "toast": "node scripts/send-test-toast.mjs"
+  }
+}

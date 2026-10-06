@@ -1,0 +1,19 @@
+# The bundle's own layer — the row this package contributes when a profile
+# selects the bundle in `dsh.profile.bundles`.
+#
+# The row id is the whole contract with the browser half and with the Host's
+# configuration forms: `@deepseek-ai/dsh-settings` addresses one editable form
+# per active entry *by entry id*, and `src/client.js` registers its Plugins-page
+# card under `<package>#<row id>`. Rename `windows-notifier` here and both halves
+# must be renamed with it.
+#
+# The row carries no `config:` block on purpose. Every switch the plugin reads
+# has a schema default in `src/settings.js`, so a freshly enabled bundle needs no
+# values at all — and the configuration form writes the user's own values into
+# the *profile* patch, where they cannot be shadowed by a lower layer. Machine
+# wide values belong in `$DSH_HOME/cordis.patch.yml`, which is applied after
+# every profile — but note that a home patch replaces the whole `config` object,
+# and that a form write it would shadow is refused outright.
+- insert:
+    - id: windows-notifier
+      name: 'dsh-windows-notifier'
